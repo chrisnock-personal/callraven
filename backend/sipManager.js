@@ -469,8 +469,13 @@ class SipManager extends EventEmitter {
     return {
       registered: this.registered,
       config: this.config ? {
-        server: this.config.server, username: this.config.username,
-        displayName: this.config.displayName, transport: this.config.transport
+        server:      this.config.server,
+        username:    this.config.username,
+        displayName: this.config.displayName,
+        transport:   this.config.transport,
+        port:        this.config.port   || 5060,
+        wsPort:      this.config.wsPort || 8088,
+        wsPath:      this.config.wsPath || '/ws'
       } : null,
       activeCall: this.activeCall ? {
         callId: this.activeCall.callId, target: this.activeCall.target,
