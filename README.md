@@ -44,6 +44,16 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 
 ---
 
+## Screenshots
+<img width="1335" height="1730" alt="Image" src="https://github.com/user-attachments/assets/9ef74ca0-d832-4d28-a445-fa0915b7ab70" /> <br>
+<img width="1335" height="1730" alt="Image" src="https://github.com/user-attachments/assets/4a0a2073-a7c7-4cee-82e4-9370324a632b" /> <br>
+<img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/11bb850e-ec9c-40f4-a68c-8452edc965ad" /> <br>
+<img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/27afe985-fa58-4e1c-8a7a-00aec9c7f165" /> <br>
+<img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/9aff4d44-c056-4236-a9b6-8e117f2b6344" /> <br>
+
+
+---
+
 ## Quick Start
 
 ### Docker / Podman Compose (recommended)
