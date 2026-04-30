@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SIP Endpoint</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #0c0e10;
+      --surface:   #111416;
+      --surface2:  #181c1f;
+      --border:    #252a2e;
+      --border2:   #2e353b;
+      --accent:    #00e5a0;
+      --accent2:   #00b87d;
+      --danger:    #ff3b5c;
+      --danger2:   #cc2244;
+      --warn:      #ffb020;
+      --info:      #4da6ff;
+      --text:      #e8eaec;
+      --text-dim:  #6b7680;
+      --text-mid:  #a0abb5;
+      --mono:      'Share Tech Mono', monospace;
+      --sans:      'Barlow Condensed', sans-serif;
+      --green-glow: 0 0 12px rgba(0,229,160,0.35);
+      --red-glow:   0 0 12px rgba(255,59,92,0.35);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 15px; min-height: 100vh; display: flex; flex-direction: column; }
+
+    /* Header */
+    header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; height: 52px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
+    .logo { font-family: var(--mono); font-size: 13px; letter-spacing: 0.12em; color: var(--accent); text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+    .logo-icon { width: 28px; height: 28px; border: 1.5px solid var(--accent); display: flex; align-items: center; justify-content: center; font-size: 10px; }
+    .status-bar { display: flex; align-items: center; gap: 20px; margin-left: auto; }
+    .status-pill { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; color: var(--text-dim); text-transform: uppercase; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); transition: background 0.3s, box-shadow 0.3s; }
+    .status-dot.active { background: var(--accent); box-shadow: var(--green-glow); animation: pulse 2s infinite; }
+    .status-dot.call   { background: var(--warn); box-shadow: 0 0 10px rgba(255,176,32,0.4); animation: pulse 1s infinite; }
+    .status-dot.error  { background: var(--danger); }
+    @keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.4} }
+
+    /* Layout */
+    main { flex:1; display:grid; grid-template-columns: 300px 1fr 300px; grid-template-rows: 1fr auto; height: calc(100vh - 52px); overflow: hidden; }
+
+    /* Panel */
+    .panel { border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+    .panel-header { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+    .panel-title { font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; color: var(--text-dim); text-transform: uppercase; flex: 1; }
+    .panel-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
+    .panel-body::-webkit-scrollbar { width: 4px; }
+    .panel-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+    /* Fields */
+    .field-group { margin-bottom: 14px; }
+    label { display: block; font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 5px; }
+    input, select { width: 100%; background: var(--surface2); border: 1px solid var(--border2); color: var(--text); font-family: var(--mono); font-size: 13px; padding: 8px 10px; outline: none; transition: border-color 0.2s; }
+    input:focus, select:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--text-dim); }
+    select option { background: var(--surface2); }
+    .field-row { display: grid; grid-template-columns: 1fr 80px; gap: 8px; }
+
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 16px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; border: 1px solid transparent; transition: all 0.15s; user-select: none; }
+    .btn:active { transform: translateY(1px); }
+    .btn:disabled { opacity: 0.35; pointer-events: none; }
+    .btn-primary  { background: var(--accent);  color: #000; border-color: var(--accent);  }
+    .btn-primary:hover  { background: var(--accent2); border-color: var(--accent2); box-shadow: var(--green-glow); }
+    .btn-danger   { background: var(--danger);  color: #fff; border-color: var(--danger);  }
+    .btn-danger:hover   { background: var(--danger2); border-color: var(--danger2); box-shadow: var(--red-glow); }
+    .btn-warn     { background: var(--warn);    color: #000; border-color: var(--warn);    }
+    .btn-info     { background: var(--info);    color: #000; border-color: var(--info);    }
+    .btn-outline  { background: transparent; color: var(--text-mid); border-color: var(--border2); }
+    .btn-outline:hover  { border-color: var(--text-mid); color: var(--text); }
+    .btn-full { width: 100%; }
+    .btn-sm { padding: 5px 10px; font-size: 10px; }
+
+    /* Call display */
+    .call-display { background: var(--surface); border-bottom: 1px solid var(--border); padding: 24px 28px; text-align: center; position: relative; }
+    .call-status-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 10px; }
+    .call-target { font-family: var(--mono); font-size: 20px; color: var(--text); letter-spacing: 0.04em; min-height: 28px; }
+    .call-duration { font-family: var(--mono); font-size: 13px; color: var(--accent); margin-top: 6px; letter-spacing: 0.12em; }
+    .call-state-badge { display: inline-block; margin-top: 8px; padding: 3px 12px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; border: 1px solid var(--border2); color: var(--text-dim); }
+    .call-state-badge.ringing   { border-color: var(--warn);   color: var(--warn);   animation: pulse 0.8s infinite; }
+    .call-state-badge.connected { border-color: var(--accent);  color: var(--accent); }
+    .call-state-badge.incoming  { border-color: var(--warn);   color: var(--warn);   animation: pulse 0.6s infinite; }
+    .call-state-badge.conf      { border-color: var(--info);   color: var(--info);   }
+
+    /* Dialer */
+    .dialer { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+    .dial-input-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .dial-input-row input { flex: 1; }
+    .dtmf-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+    .dtmf-key { background: var(--surface2); border: 1px solid var(--border2); color: var(--text); font-family: var(--mono); font-size: 15px; height: 44px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 1px; transition: all 0.1s; user-select: none; }
+    .dtmf-key:hover  { background: var(--border2); }
+    .dtmf-key:active { transform: scale(0.95); }
+    .dtmf-key .sub { font-size: 7px; letter-spacing: 0.12em; color: var(--text-dim); }
+
+    /* Call actions */
+    .call-actions { padding: 14px 20px; display: flex; flex-direction: column; gap: 8px; }
+    .action-row { display: flex; gap: 8px; }
+    .action-row .btn { flex: 1; }
+
+    /* Incoming overlay */
+    .incoming-overlay { display: none; position: absolute; inset: 0; background: rgba(12,14,16,0.95); flex-direction: column; align-items: center; justify-content: center; gap: 14px; z-index: 50; }
+    .incoming-overlay.visible { display: flex; }
+    .incoming-ring-icon { width: 56px; height: 56px; border: 2px solid var(--warn); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; animation: ring-bounce 0.5s ease-in-out infinite alternate; }
+    @keyframes ring-bounce { from{transform:rotate(-15deg)} to{transform:rotate(15deg)} }
+    .incoming-from { font-family: var(--mono); font-size: 13px; color: var(--text); text-align: center; }
+    .incoming-actions { display: flex; gap: 14px; }
+
+    /* Transfer/Conf section */
+    .section { padding: 14px 20px; border-bottom: 1px solid var(--border); }
+    .section-title { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 10px; }
+    .xfer-row { display: flex; gap: 6px; }
+    .xfer-row input { flex: 1; }
+
+    /* Right panel tabs */
+    .tabs { display: flex; border-bottom: 1px solid var(--border); }
+    .tab { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; padding: 10px 14px; cursor: pointer; color: var(--text-dim); border-bottom: 2px solid transparent; transition: all 0.15s; background: none; border-top: none; border-left: none; border-right: none; }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab:hover:not(.active) { color: var(--text-mid); }
+    .tab-content { display: none; padding: 14px 20px; flex: 1; overflow-y: auto; }
+    .tab-content.active { display: block; }
+
+    /* WAV files */
+    .wav-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    .wav-item { background: var(--surface2); border: 1px solid var(--border); padding: 10px; display: flex; align-items: center; gap: 8px; }
+    .wav-name { font-family: var(--mono); font-size: 11px; color: var(--text); flex: 1; word-break: break-all; }
+    .wav-actions { display: flex; gap: 4px; }
+
+    /* Capture list */
+    .capture-list { display: flex; flex-direction: column; gap: 8px; }
+    .capture-item { background: var(--surface2); border: 1px solid var(--border); padding: 12px; }
+    .capture-name { font-family: var(--mono); font-size: 11px; color: var(--text); word-break: break-all; }
+    .capture-meta { font-family: var(--mono); font-size: 10px; color: var(--text-dim); display: flex; gap: 12px; margin-top: 4px; }
+    .capture-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .capture-item.new { border-color: var(--accent); animation: capture-flash 0.6s ease 2; }
+    @keyframes capture-flash { 0%,100%{border-color:var(--accent)} 50%{border-color:transparent} }
+
+    /* Upload zone */
+    .upload-zone { border: 1px dashed var(--border2); padding: 20px; text-align: center; cursor: pointer; transition: border-color 0.2s; margin-bottom: 12px; }
+    .upload-zone:hover { border-color: var(--accent); }
+    .upload-zone-text { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+
+    /* Log */
+    .log-panel { grid-column: 1/-1; border-top: 1px solid var(--border); height: 140px; display: flex; flex-direction: column; }
+    .log-entries { flex: 1; overflow-y: auto; padding: 6px 16px; font-family: var(--mono); font-size: 11px; line-height: 1.6; display: flex; flex-direction: column-reverse; }
+    .log-entries::-webkit-scrollbar { width: 3px; }
+    .log-entries::-webkit-scrollbar-thumb { background: var(--border2); }
+    .log-entry { display: flex; gap: 12px; }
+    .log-time { color: var(--text-dim); min-width: 80px; }
+    .log-level { min-width: 44px; }
+    .log-level.info  { color: var(--accent); }
+    .log-level.warn  { color: var(--warn); }
+    .log-level.error { color: var(--danger); }
+    .log-msg { color: var(--text-mid); }
+
+    .empty-state { text-align: center; padding: 30px 20px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); letter-spacing: 0.08em; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+    /* History */
+    .history-item { background: var(--surface2); border: 1px solid var(--border); padding: 10px 12px; margin-bottom: 6px; }
+    .history-row  { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .history-dir  { font-family: var(--mono); font-size: 9px; padding: 2px 6px; border: 1px solid; }
+    .history-dir.inbound  { border-color: var(--accent); color: var(--accent); }
+    .history-dir.outbound { border-color: var(--info);   color: var(--info);   }
+    .history-target { font-family: var(--mono); font-size: 12px; color: var(--text); flex: 1; }
+    .history-status { font-family: var(--mono); font-size: 10px; }
+    .history-status.completed { color: var(--accent); }
+    .history-status.missed    { color: var(--warn);   }
+    .history-status.failed    { color: var(--danger);  }
+    .history-status.active    { color: var(--info);    }
+    .history-meta  { font-family: var(--mono); font-size: 10px; color: var(--text-dim); display: flex; gap: 14px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><div class="logo-icon">SIP</div>ENDPOINT</div>
+  <div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);letter-spacing:0.08em;">v1.0 · CONTAINERIZED SOFTPHONE</div>
+  <div class="status-bar">
+    <div class="status-pill"><div class="status-dot" id="reg-dot"></div><span id="reg-label">UNREGISTERED</span></div>
+    <div class="status-pill"><div class="status-dot" id="call-dot"></div><span id="call-label">IDLE</span></div>
+    <div class="status-pill"><div class="status-dot" id="ws-dot"></div><span>WS</span></div>
+  </div>
+</header>
+
+<main>
+
+  <!-- LEFT: Registration -->
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title">SIP Registration</div></div>
+    <div class="panel-body">
+      <div class="field-group field-row">
+        <div><label>SIP Server</label><input id="cfg-server" type="text" placeholder="sip.example.com"></div>
+        <div><label>Port</label><input id="cfg-port" type="number" placeholder="5060" value="5060"></div>
+      </div>
+      <div class="field-group"><label>WS Port</label><input id="cfg-wsport" type="number" placeholder="8088" value="8088"></div>
+      <div class="field-group"><label>Transport</label>
+        <select id="cfg-transport"><option value="UDP">UDP (ws://)</option><option value="TLS">TLS (wss://)</option></select>
+      </div>
+      <div class="field-group"><label>Username</label><input id="cfg-user" type="text" placeholder="1001"></div>
+      <div class="field-group"><label>Password</label><input id="cfg-pass" type="password" placeholder="••••••••"></div>
+      <div class="field-group"><label>Display Name</label><input id="cfg-display" type="text" placeholder="Alice"></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary btn-full" id="btn-register" onclick="doRegister()">Register</button>
+        <button class="btn btn-outline" id="btn-unregister" onclick="doUnregister()" disabled>Unreg</button>
+      </div>
+
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
+        <div class="panel-title" style="margin-bottom:12px;">REST API</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:2.2;">
+          <div><span style="color:var(--accent)">GET</span>  /api/status</div>
+          <div><span style="color:var(--warn)">POST</span> /api/register</div>
+          <div><span style="color:var(--warn)">POST</span> /api/call <span style="color:var(--text-dim)">{target}</span></div>
+          <div><span style="color:var(--warn)">POST</span> /api/hangup</div>
+          <div><span style="color:var(--warn)">POST</span> /api/answer</div>
+          <div><span style="color:var(--warn)">POST</span> /api/transfer/blind <span style="color:var(--text-dim)">{target}</span></div>
+          <div><span style="color:var(--warn)">POST</span> /api/transfer/attended <span style="color:var(--text-dim)">{target}</span></div>
+          <div><span style="color:var(--warn)">POST</span> /api/conference <span style="color:var(--text-dim)">{target}</span></div>
+          <div><span style="color:var(--warn)">POST</span> /api/conference/end</div>
+          <div><span style="color:var(--warn)">POST</span> /api/play <span style="color:var(--text-dim)">{filename}</span></div>
+          <div><span style="color:var(--warn)">POST</span> /api/play/stop</div>
+          <div><span style="color:var(--accent)">GET</span>  /api/captures</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER: Dialpad + Call Controls -->
+  <div class="panel">
+    <div class="call-display" style="position:relative;">
+      <div class="incoming-overlay" id="incoming-overlay">
+        <div class="incoming-ring-icon">📞</div>
+        <div class="call-status-label">INCOMING CALL</div>
+        <div class="incoming-from" id="incoming-from">Unknown</div>
+        <div class="incoming-actions">
+          <button class="btn btn-primary" onclick="doAnswer()">▶ ANSWER</button>
+          <button class="btn btn-danger"  onclick="doReject()">✕ REJECT</button>
+        </div>
+      </div>
+      <div class="call-status-label" id="call-status-label">READY</div>
+      <div class="call-target" id="call-target">—</div>
+      <div class="call-duration" id="call-duration"></div>
+      <div id="call-badge"></div>
+    </div>
+
+    <div class="dialer">
+      <div class="dial-input-row">
+        <input id="dial-target" type="text" placeholder="sip:1002@server or 1002" />
+        <button class="btn btn-primary" id="btn-call"   onclick="doCall()">CALL</button>
+        <button class="btn btn-danger"  id="btn-hangup" onclick="doHangup()" style="display:none;">END</button>
+      </div>
+      <div class="dtmf-grid">
+        <button class="dtmf-key" onclick="dtmf('1')">1<span class="sub"></span></button>
+        <button class="dtmf-key" onclick="dtmf('2')">2<span class="sub">ABC</span></button>
+        <button class="dtmf-key" onclick="dtmf('3')">3<span class="sub">DEF</span></button>
+        <button class="dtmf-key" onclick="dtmf('4')">4<span class="sub">GHI</span></button>
+        <button class="dtmf-key" onclick="dtmf('5')">5<span class="sub">JKL</span></button>
+        <button class="dtmf-key" onclick="dtmf('6')">6<span class="sub">MNO</span></button>
+        <button class="dtmf-key" onclick="dtmf('7')">7<span class="sub">PQRS</span></button>
+        <button class="dtmf-key" onclick="dtmf('8')">8<span class="sub">TUV</span></button>
+        <button class="dtmf-key" onclick="dtmf('9')">9<span class="sub">WXYZ</span></button>
+        <button class="dtmf-key" onclick="dtmf('*')">*</button>
+        <button class="dtmf-key" onclick="dtmf('0')">0<span class="sub">+</span></button>
+        <button class="dtmf-key" onclick="dtmf('#')">#</button>
+      </div>
+    </div>
+
+    <!-- Hold / Resume -->
+    <div class="section">
+      <div class="action-row">
+        <button class="btn btn-warn btn-full" id="btn-hold"   onclick="doHold()">⏸ HOLD</button>
+        <button class="btn btn-primary btn-full" id="btn-resume" onclick="doResume()" style="display:none;">▶ RESUME</button>
+      </div>
+    </div>
+
+    <!-- Transfer -->
+    <div class="section">
+      <div class="section-title">Transfer</div>
+      <div class="xfer-row" style="margin-bottom:6px;">
+        <input id="xfer-target" type="text" placeholder="Extension or SIP URI" />
+      </div>
+      <div class="action-row">
+        <button class="btn btn-warn btn-full" onclick="doBlindTransfer()">↗ BLIND</button>
+        <button class="btn btn-outline btn-full" onclick="doAttendedTransfer()">⇄ ATTENDED</button>
+      </div>
+    </div>
+
+    <!-- Conference -->
+    <div class="section">
+      <div class="section-title">Conference</div>
+      <div class="xfer-row" style="margin-bottom:6px;">
+        <input id="conf-target" type="text" placeholder="Extension to conference in" />
+      </div>
+      <div class="action-row">
+        <button class="btn btn-info btn-full" id="btn-conf"     onclick="doConference()">+ ADD TO CALL</button>
+        <button class="btn btn-danger btn-full" id="btn-endconf" onclick="doEndConference()" style="display:none;">DROP CONF</button>
+      </div>
+      <div id="conf-status" style="font-family:var(--mono);font-size:10px;color:var(--text-dim);margin-top:8px;"></div>
+    </div>
+
+    <!-- WAV Playback -->
+    <div class="section">
+      <div class="section-title">WAV Playback</div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+        <select id="wav-select" style="flex:1;"><option value="">— select file —</option></select>
+        <button class="btn btn-primary" onclick="doPlayWav()">▶ PLAY</button>
+        <button class="btn btn-outline" onclick="doStopWav()">■ STOP</button>
+      </div>
+      <div id="wav-status" style="font-family:var(--mono);font-size:10px;color:var(--text-dim);"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Captures + WAV files -->
+  <div class="panel" style="border-right:none;">
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab(this,'tab-captures')">Captures</button>
+      <button class="tab" onclick="switchTab(this,'tab-wavfiles')">WAV Files</button>
+      <button class="tab" onclick="switchTab(this,'tab-history');loadHistory()">History</button>
+    </div>
+
+    <div id="tab-captures" class="tab-content active">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+        <button class="btn btn-outline btn-sm" onclick="loadCaptures()">↻ Refresh</button>
+      </div>
+      <div id="capture-list" class="capture-list">
+        <div class="empty-state">NO CAPTURES YET</div>
+      </div>
+    </div>
+
+    <div id="tab-wavfiles" class="tab-content">
+      <div class="upload-zone" onclick="document.getElementById('wav-upload-input').click()">
+        <div class="upload-zone-text">CLICK TO UPLOAD WAV FILE<br><span style="font-size:9px;opacity:0.6;">8kHz mono PCM recommended</span></div>
+        <input id="wav-upload-input" type="file" accept=".wav,audio/wav" style="display:none" onchange="uploadWav(this)">
+      </div>
+      <div id="wav-list" class="wav-list">
+        <div class="empty-state">NO WAV FILES</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM: Log -->
+  <div class="log-panel">
+    <div class="panel-header" style="padding:6px 16px;">
+      <div class="panel-title">System Log</div>
+      <div style="display:flex;gap:6px;">
+        <a href="/api/log/export" download class="btn btn-outline btn-sm" style="text-decoration:none;">↓ EXPORT</a>
+        <button class="btn btn-outline btn-sm" onclick="clearLog()">CLEAR</button>
+      </div>
+    </div>
+    <div class="log-entries" id="log-entries"></div>
+  </div>
+
+</main>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+let state     = { registered: false, activeCall: null, incomingCall: null };
+let ws        = null;
+let callTimer = null;
+let callSecs  = 0;
+const API     = '';
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.onopen    = () => { setDot('ws-dot', 'active'); addLog('info', 'WebSocket connected'); };
+  ws.onclose   = () => { setDot('ws-dot', ''); addLog('warn', 'WebSocket disconnected — reconnecting...'); setTimeout(connectWS, 3000); };
+  ws.onmessage = (e) => handleWSMessage(JSON.parse(e.data));
+}
+
+function handleWSMessage({ type, data }) {
+  switch (type) {
+    case 'state':            applyState(data); break;
+    case 'registered':       onRegistered(data); break;
+    case 'unregistered':     onUnregistered(); break;
+    case 'registrationFailed': setDot('reg-dot','error'); addLog('error',`Registration failed: ${data.cause}`); break;
+    case 'incomingCall':     onIncomingCall(data); break;
+    case 'callConnected':    onCallConnected(data); break;
+    case 'callEnded':        onCallEnded(data); break;
+    case 'callFailed':       addLog('error',`Call failed: ${data.cause}`); onCallEnded(data); break;
+    case 'conferenceStarted': onConfStarted(data); break;
+    case 'callHeld':    onCallHeld(data); break;
+    case 'callResumed': onCallResumed(data); break;
+    case 'conferenceEnded':  onConfEnded(); break;
+    case 'playbackEnded':    onPlaybackEnded(data); break;
+    case 'captureReady':     addLog('info',`Capture ready: ${data.filename} (${fmtSize(data.size)})`); loadCaptures(); break;
+    case 'log':              addLog(data.level, data.message); break;
+  }
+}
+
+function applyState(s) {
+  state = s;
+  if (s.registered) {
+    setDot('reg-dot','active');
+    setLabel('reg-label', s.config ? `${s.config.username}@${s.config.server}` : 'REGISTERED');
+    document.getElementById('btn-register').disabled   = true;
+    document.getElementById('btn-unregister').disabled = false;
+  }
+  if (s.activeCall) {
+    setDot('call-dot','call'); setLabel('call-label','ACTIVE');
+    document.getElementById('call-target').textContent = s.activeCall.target;
+    document.getElementById('btn-call').style.display   = 'none';
+    document.getElementById('btn-hangup').style.display = '';
+  }
+  loadCaptures();
+  loadWavFiles();
+  if (s.logs) [...s.logs].reverse().forEach(l => addLog(l.level, l.message, l.timestamp));
+}
+
+// ─── SIP events ───────────────────────────────────────────────────────────────
+function onRegistered(data) {
+  state.registered = true;
+  setDot('reg-dot','active');
+  setLabel('reg-label', `${data.username}@${data.server}`);
+  addLog('info',`Registered: ${data.displayName} <${data.username}@${data.server}>`);
+  document.getElementById('btn-register').disabled   = true;
+  document.getElementById('btn-unregister').disabled = false;
+}
+
+function onUnregistered() {
+  state.registered = false;
+  setDot('reg-dot',''); setLabel('reg-label','UNREGISTERED');
+  document.getElementById('btn-register').disabled   = false;
+  document.getElementById('btn-unregister').disabled = true;
+  addLog('info','Unregistered');
+}
+
+function onIncomingCall(data) {
+  state.incomingCall = data;
+  document.getElementById('incoming-from').textContent = `${data.displayName || ''}\n${data.from}`;
+  document.getElementById('incoming-overlay').classList.add('visible');
+  setDot('call-dot','call'); setLabel('call-label','INCOMING');
+  addLog('warn',`Incoming call from ${data.displayName || data.from}`);
+}
+
+function onCallConnected(data) {
+  state.activeCall = { ...state.activeCall, status: 'connected' };
+  startCallTimer();
+  setDot('call-dot','call'); setLabel('call-label','ACTIVE');
+  setBadge('connected','CONNECTED');
+  document.getElementById('btn-call').style.display   = 'none';
+  document.getElementById('btn-hangup').style.display = '';
+  addLog('info','Call connected');
+}
+
+function onCallEnded(data) {
+  state.activeCall = null; state.incomingCall = null;
+  stopCallTimer(); resetCallUI(); hideIncoming();
+  setDot('call-dot',''); setLabel('call-label','IDLE');
+  onConfEnded();
+  addLog('info',`Call ended${data.cause ? ': '+data.cause : ''}`);
+  setTimeout(loadCaptures, 1500);
+}
+
+function onConfStarted(data) {
+  document.getElementById('btn-conf').style.display    = 'none';
+  document.getElementById('btn-endconf').style.display = '';
+  document.getElementById('conf-status').textContent   = `Conference active: ${data.target}`;
+  setBadge('conf','3-WAY CALL');
+  addLog('info',`Conference started: ${data.target}`);
+}
+
+function onConfEnded() {
+  document.getElementById('btn-conf').style.display    = '';
+  document.getElementById('btn-endconf').style.display = 'none';
+  document.getElementById('conf-status').textContent   = '';
+}
+
+function onPlaybackEnded(data) {
+  document.getElementById('wav-status').textContent =
+    data.error ? `Error: ${data.error}` : data.stopped ? 'Stopped.' : `Done: ${data.file || ''}`;
+}
+
+// ─── API calls ────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const res = await fetch(API + path, {
+    method, headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return res.json();
+}
+
+async function doRegister() {
+  const cfg = {
+    server: document.getElementById('cfg-server').value.trim(),
+    port:   parseInt(document.getElementById('cfg-port').value)||5060,
+    wsPort: parseInt(document.getElementById('cfg-wsport').value)||8088,
+    username:    document.getElementById('cfg-user').value.trim(),
+    password:    document.getElementById('cfg-pass').value,
+    displayName: document.getElementById('cfg-display').value.trim(),
+    transport:   document.getElementById('cfg-transport').value
+  };
+  if (!cfg.server||!cfg.username||!cfg.password) { addLog('error','Server, username and password required'); return; }
+  addLog('info',`Registering ${cfg.username}@${cfg.server}...`);
+  document.getElementById('btn-register').disabled = true;
+  const r = await api('POST','/api/register',cfg);
+  if (r.error) { addLog('error',r.error); document.getElementById('btn-register').disabled = false; }
+}
+
+async function doUnregister() { await api('POST','/api/unregister'); }
+
+async function doCall() {
+  const target = document.getElementById('dial-target').value.trim();
+  if (!target) return;
+  addLog('info',`Calling ${target}...`);
+  document.getElementById('call-target').textContent = target;
+  document.getElementById('call-status-label').textContent = 'CALLING';
+  setBadge('ringing','RINGING');
+  setDot('call-dot','call');
+  document.getElementById('btn-call').style.display   = 'none';
+  document.getElementById('btn-hangup').style.display = '';
+  const r = await api('POST','/api/call',{ target });
+  if (r.error) { addLog('error',r.error); resetCallUI(); }
+}
+
+async function doHangup() {
+  addLog('info','Hanging up...');
+  await api('POST','/api/hangup');
+}
+
+async function doAnswer() {
+  hideIncoming();
+  const r = await api('POST','/api/answer');
+  if (r.error) addLog('error',r.error);
+  else { document.getElementById('btn-call').style.display='none'; document.getElementById('btn-hangup').style.display=''; }
+}
+
+async function doReject() { hideIncoming(); await api('POST','/api/reject'); addLog('info','Call rejected'); }
+
+async function dtmf(digit) {
+  document.getElementById('dial-target').value += digit;
+  if (state.activeCall) await api('POST','/api/dtmf',{ digit });
+}
+
+// Transfer
+async function doBlindTransfer() {
+  const target = document.getElementById('xfer-target').value.trim();
+  if (!target) { addLog('error','Enter a transfer target'); return; }
+  addLog('info',`Blind transfer -> ${target}`);
+  const r = await api('POST','/api/transfer/blind',{ target });
+  if (r.error) addLog('error',r.error);
+  else addLog('info',`Transfer initiated to ${target}`);
+}
+
+async function doAttendedTransfer() {
+  const target = document.getElementById('xfer-target').value.trim();
+  if (!target) { addLog('error','Enter a transfer target'); return; }
+  addLog('info',`Attended transfer -> ${target}`);
+  const r = await api('POST','/api/transfer/attended',{ target });
+  if (r.error) addLog('error',r.error);
+  else addLog('info',`Attended transfer in progress to ${target}`);
+}
+
+// Conference
+async function doConference() {
+  const target = document.getElementById('conf-target').value.trim();
+  if (!target) { addLog('error','Enter an extension to conference'); return; }
+  addLog('info',`Conferencing in ${target}...`);
+  const r = await api('POST','/api/conference',{ target });
+  if (r.error) addLog('error',r.error);
+}
+
+async function doEndConference() {
+  await api('POST','/api/conference/end');
+  onConfEnded();
+  addLog('info','Conference leg dropped');
+}
+
+// WAV playback
+async function doPlayWav() {
+  const filename = document.getElementById('wav-select').value;
+  if (!filename) { addLog('error','Select a WAV file'); return; }
+  document.getElementById('wav-status').textContent = `Playing: ${filename}`;
+  const r = await api('POST','/api/play',{ filename });
+  if (r.error) { addLog('error',r.error); document.getElementById('wav-status').textContent = ''; }
+  else addLog('info',`Playing: ${filename}`);
+}
+
+async function doStopWav() {
+  await api('POST','/api/play/stop');
+  document.getElementById('wav-status').textContent = 'Stopped.';
+}
+
+// ─── Captures ────────────────────────────────────────────────────────────────
+async function loadCaptures() {
+  const r = await api('GET','/api/captures');
+  const list = document.getElementById('capture-list');
+  if (!r.captures || !r.captures.length) {
+    list.innerHTML = '<div class="empty-state">NO CAPTURES YET</div>'; return;
+  }
+  list.innerHTML = r.captures.map(c => `
+    <div class="capture-item">
+      <div class="capture-name">${c.filename}</div>
+      <div class="capture-meta"><span>${fmtSize(c.size)}</span><span>${fmtDate(c.created)}</span></div>
+      <div class="capture-actions">
+        <a href="${c.url}" download class="btn btn-primary btn-sm" style="text-decoration:none;">↓ PCAP</a>
+        ${c.audioUrl ? `<a href="${c.audioUrl}" download class="btn btn-info btn-sm" style="text-decoration:none;">↓ WAV</a>` : ''}
+        <button class="btn btn-outline btn-sm" onclick="deleteCap('${c.filename}')">✕</button>
+      </div>
+    </div>`).join('');
+}
+
+async function deleteCap(filename) { await api('DELETE',`/api/captures/${filename}`); loadCaptures(); }
+
+// ─── WAV files ────────────────────────────────────────────────────────────────
+async function loadWavFiles() {
+  const r = await api('GET','/api/wavfiles');
+  const list = document.getElementById('wav-list');
+  const sel  = document.getElementById('wav-select');
+
+  if (!r.files || !r.files.length) {
+    list.innerHTML = '<div class="empty-state">NO WAV FILES</div>';
+    sel.innerHTML  = '<option value="">— select file —</option>';
+    return;
+  }
+
+  list.innerHTML = r.files.map(f => `
+    <div class="wav-item">
+      <div class="wav-name">${f.filename}<br><span style="color:var(--text-dim);font-size:9px;">${fmtSize(f.size)}</span></div>
+      <div class="wav-actions">
+        <button class="btn btn-outline btn-sm" onclick="deleteWav('${f.filename}')">✕</button>
+      </div>
+    </div>`).join('');
+
+  sel.innerHTML = '<option value="">— select file —</option>' +
+    r.files.map(f => `<option value="${f.filename}">${f.filename}</option>`).join('');
+}
+
+async function uploadWav(input) {
+  const file = input.files[0];
+  if (!file) return;
+  addLog('info',`Uploading ${file.name}...`);
+  const form = new FormData();
+  form.append('file', file);
+  const res  = await fetch('/api/wavfiles/upload', { method: 'POST', body: form });
+  const data = await res.json();
+  if (data.error) addLog('error',data.error);
+  else { addLog('info',`Uploaded: ${data.filename}`); loadWavFiles(); }
+  input.value = '';
+}
+
+async function deleteWav(filename) { await api('DELETE',`/api/wavfiles/${filename}`); loadWavFiles(); }
+
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+function setDot(id, cls)  { document.getElementById(id).className = 'status-dot' + (cls ? ' '+cls : ''); }
+function setLabel(id, t)  { document.getElementById(id).textContent = t; }
+function setBadge(cls, t) { document.getElementById('call-badge').innerHTML = `<span class="call-state-badge ${cls}">${t}</span>`; }
+function hideIncoming()   { document.getElementById('incoming-overlay').classList.remove('visible'); }
+
+function resetCallUI() {
+  setDot('call-dot',''); setLabel('call-label','IDLE');
+  document.getElementById('call-target').textContent = '—';
+  document.getElementById('call-status-label').textContent = 'READY';
+  document.getElementById('call-duration').textContent = '';
+  document.getElementById('call-badge').innerHTML = '';
+  document.getElementById('btn-call').style.display   = '';
+  document.getElementById('btn-hangup').style.display = 'none';
+  document.getElementById('btn-hold').style.display   = '';
+  document.getElementById('btn-resume').style.display = 'none';
+}
+
+function startCallTimer() {
+  callSecs = 0;
+  callTimer = setInterval(() => {
+    callSecs++;
+    const h = String(Math.floor(callSecs/3600)).padStart(2,'0');
+    const m = String(Math.floor((callSecs%3600)/60)).padStart(2,'0');
+    const s = String(callSecs%60).padStart(2,'0');
+    document.getElementById('call-duration').textContent = `${h}:${m}:${s}`;
+  }, 1000);
+}
+
+function stopCallTimer() { clearInterval(callTimer); callTimer = null; }
+
+function addLog(level, message, ts) {
+  const el   = document.getElementById('log-entries');
+  const time = ts ? new Date(ts).toTimeString().slice(0,8) : new Date().toTimeString().slice(0,8);
+  const div  = document.createElement('div');
+  div.className = 'log-entry';
+  div.innerHTML = `<span class="log-time">${time}</span><span class="log-level ${level}">${level.toUpperCase()}</span><span class="log-msg">${message}</span>`;
+  el.insertBefore(div, el.firstChild);
+  while (el.children.length > 200) el.removeChild(el.lastChild);
+}
+
+function clearLog() { document.getElementById('log-entries').innerHTML = ''; }
+
+function fmtSize(b) {
+  if (!b) return '0 B';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(2) + ' MB';
+}
+
+function fmtDate(d) { return d ? new Date(d).toLocaleString() : ''; }
+
+function switchTab(btn, tabId) {
+  btn.closest('.tabs').querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.getElementById(tabId).classList.add('active');
+}
+
+// Hold / Resume
+function onCallHeld(data) {
+  document.getElementById('btn-hold').style.display   = 'none';
+  document.getElementById('btn-resume').style.display = '';
+  setBadge('ringing', 'ON HOLD');
+  addLog('info', 'Call on hold');
+}
+
+function onCallResumed(data) {
+  document.getElementById('btn-hold').style.display   = '';
+  document.getElementById('btn-resume').style.display = 'none';
+  setBadge('connected', 'CONNECTED');
+  addLog('info', 'Call resumed');
+}
+
+async function doHold() {
+  const r = await api('POST', '/api/hold');
+  if (r.error) addLog('error', r.error);
+  else onCallHeld({});
+}
+
+async function doResume() {
+  const r = await api('POST', '/api/resume');
+  if (r.error) addLog('error', r.error);
+  else onCallResumed({});
+}
+
+// Reset hold buttons on call end
+const _origOnCallEnded = onCallEnded;
+// (already handled in resetCallUI — hold buttons hidden since btn-hangup hides)
+
+// ─── Call History ─────────────────────────────────────────────────────────────
+async function loadHistory() {
+  const r = await api('GET', '/api/history');
+  const list = document.getElementById('history-list');
+  if (!r.history || !r.history.length) {
+    list.innerHTML = '<div class="empty-state">NO CALL HISTORY</div>';
+    return;
+  }
+  list.innerHTML = r.history.map(h => {
+    const dur = h.duration != null
+      ? `${Math.floor(h.duration/60)}m ${h.duration%60}s`
+      : h.status === 'active' ? 'active' : '—';
+    const time = h.startTime ? new Date(h.startTime).toLocaleString() : '';
+    const cap  = h.captureFile
+      ? `<a href="${h.captureFile}" download style="color:var(--accent);font-family:var(--mono);font-size:10px;text-decoration:none;">↓ pcap</a>`
+      : '';
+    return `<div class="history-item">
+      <div class="history-row">
+        <span class="history-dir ${h.direction}">${h.direction === 'inbound' ? '↙' : '↗'} ${h.direction.toUpperCase()}</span>
+        <span class="history-target">${h.displayName || h.target}</span>
+        <span class="history-status ${h.status}">${h.status.toUpperCase()}</span>
+      </div>
+      <div class="history-meta">
+        <span>${h.target || ''}</span>
+        <span>${dur}</span>
+        <span>${time}</span>
+        ${cap}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function clearHistory() {
+  if (!confirm('Clear all call history?')) return;
+  await api('DELETE', '/api/history');
+  loadHistory();
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+connectWS();
+addLog('info','SIP Endpoint UI initialised');
+document.getElementById('dial-target').addEventListener('keydown', e => { if(e.key==='Enter') doCall(); });
+</script>
+</body>
+</html>

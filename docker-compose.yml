@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  sip-endpoint:
+    build: .
+    container_name: sip-endpoint
+    network_mode: host
+    user: root
+    privileged: true
+    security_opt:
+      - label=disable
+    volumes:
+      - captures:/captures
+    environment:
+      PORT: 3000
+      SIP_PORT: 5060
+      RTP_PORT_LOW: 10000
+      RTP_PORT_HIGH: 20000
+      CAPTURE_INTERFACE: any
+      STUN_SERVER: stun:stun.l.google.com:19302
+    restart: unless-stopped
+
+volumes:
+  captures:
+    driver: local
