@@ -208,6 +208,45 @@
 
     .field-row { display: grid; grid-template-columns: 1fr 88px; gap: 8px; }
 
+    /* Registration form locked state */
+    .reg-form-locked input,
+    .reg-form-locked select {
+      background: var(--bg2);
+      color: var(--text-mid);
+      border-color: var(--border);
+      cursor: not-allowed;
+      box-shadow: none;
+      pointer-events: none;
+    }
+
+    .reg-form-locked label {
+      color: var(--text-dim);
+    }
+
+    .reg-locked-banner {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: var(--green-light);
+      border: 1px solid var(--green-border);
+      border-radius: 8px;
+      margin-bottom: 14px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--green);
+    }
+
+    .reg-locked-banner.show { display: flex; }
+
+    .reg-locked-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(5,150,105,0.2);
+      flex-shrink: 0;
+    }
+
     /* ── Buttons ─────────────────────────────────────────────────────── */
     .btn {
       display: inline-flex;
@@ -522,31 +561,66 @@
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 11px 14px;
+      padding: 10px 12px;
       margin-bottom: 7px;
       box-shadow: var(--shadow-sm);
     }
 
-    .history-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .history-row-1 { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+    .history-row-2 { display: flex; align-items: center; gap: 7px; }
 
     .history-dir {
-      font-size: 11px;
-      font-weight: 600;
-      padding: 2px 9px;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 8px;
       border-radius: 20px;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
     .history-dir.inbound  { background: var(--green-light); color: var(--green); }
     .history-dir.outbound { background: var(--blue-light);  color: var(--blue);  }
 
-    .history-target { font-size: 14px; font-weight: 500; flex: 1; letter-spacing: -0.01em; }
+    .history-target {
+      font-size: 13px;
+      font-weight: 500;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      letter-spacing: -0.01em;
+    }
 
-    .history-status { font-size: 11px; font-weight: 600; }
+    .history-status { font-size: 11px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
     .history-status.completed { color: var(--green); }
     .history-status.missed    { color: var(--amber); }
     .history-status.failed    { color: var(--red); }
     .history-status.active    { color: var(--blue); }
 
-    .history-meta { font-size: 11px; color: var(--text-dim); display: flex; gap: 12px; font-family: var(--mono); font-weight: 300; }
+    .history-duration {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--text-mid);
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .history-time {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 300;
+      color: var(--text-dim);
+      flex: 1;
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
     /* ── Conference status ───────────────────────────────────────────── */
     #conf-status { font-size: 12px; color: var(--violet); margin-top: 8px; font-weight: 500; }
@@ -730,21 +804,29 @@
     </div>
     <div class="panel-body">
 
-      <div class="field-group field-row">
-        <div><label>SIP Server</label><input id="cfg-server" type="text" placeholder="pbx.local"></div>
-        <div><label>Port</label><input id="cfg-port" type="number" value="5060"></div>
+      <div class="reg-locked-banner" id="reg-locked-banner">
+        <div class="reg-locked-dot"></div>
+        <span id="reg-locked-text">Registered</span>
+        <span style="margin-left:auto;font-size:11px;font-weight:400;color:var(--green);opacity:0.8;">Unreg to change</span>
       </div>
-      <div class="field-group"><label>WebSocket Port</label><input id="cfg-wsport" type="number" value="8088"></div>
-      <div class="field-group">
-        <label>Transport</label>
-        <select id="cfg-transport">
-          <option value="UDP">UDP (ws://)</option>
-          <option value="TLS">TLS (wss://)</option>
-        </select>
+
+      <div id="reg-form">
+        <div class="field-group field-row">
+          <div><label>SIP Server</label><input id="cfg-server" type="text" placeholder="pbx.local"></div>
+          <div><label>Port</label><input id="cfg-port" type="number" value="5060"></div>
+        </div>
+        <div class="field-group"><label>WebSocket Port</label><input id="cfg-wsport" type="number" value="8088"></div>
+        <div class="field-group">
+          <label>Transport</label>
+          <select id="cfg-transport">
+            <option value="UDP">UDP (ws://)</option>
+            <option value="TLS">TLS (wss://)</option>
+          </select>
+        </div>
+        <div class="field-group"><label>Username</label><input id="cfg-user" type="text" placeholder="1001"></div>
+        <div class="field-group"><label>Password</label><input id="cfg-pass" type="password" placeholder="••••••••"></div>
+        <div class="field-group"><label>Display Name</label><input id="cfg-display" type="text" placeholder="Alice"></div>
       </div>
-      <div class="field-group"><label>Username</label><input id="cfg-user" type="text" placeholder="1001"></div>
-      <div class="field-group"><label>Password</label><input id="cfg-pass" type="password" placeholder="••••••••"></div>
-      <div class="field-group"><label>Display Name</label><input id="cfg-display" type="text" placeholder="Alice"></div>
 
       <div style="display:flex;gap:8px;">
         <button class="btn btn-primary btn-full" id="btn-register" onclick="doRegister()">Register</button>
@@ -984,6 +1066,7 @@ function applyState(s) {
     setLabel('reg-label', s.config ? `${s.config.username}@${s.config.server}` : 'Registered');
     document.getElementById('btn-register').disabled   = true;
     document.getElementById('btn-unregister').disabled = false;
+    lockRegForm(s.config);
   }
   if (s.activeCall) {
     setHeaderBadge('call-badge-header','call-active');
@@ -1005,6 +1088,7 @@ function onRegistered(data) {
   addLog('info',`Registered: ${data.displayName} <${data.username}@${data.server}>`);
   document.getElementById('btn-register').disabled   = true;
   document.getElementById('btn-unregister').disabled = false;
+  lockRegForm({ username: data.username, server: data.server, displayName: data.displayName });
 }
 
 function onUnregistered() {
@@ -1013,6 +1097,7 @@ function onUnregistered() {
   setLabel('reg-label','Unregistered');
   document.getElementById('btn-register').disabled   = false;
   document.getElementById('btn-unregister').disabled = true;
+  unlockRegForm();
   addLog('info','Unregistered');
 }
 
@@ -1237,6 +1322,43 @@ async function uploadWav(input) {
 async function deleteWav(filename) { await api('DELETE',`/api/wavfiles/${filename}`); loadWavFiles(); }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
+function lockRegForm(config) {
+  const form   = document.getElementById('reg-form');
+  const banner = document.getElementById('reg-locked-banner');
+  if (!form) return;
+
+  form.classList.add('reg-form-locked');
+  banner.classList.add('show');
+
+  // Populate fields from the config that was actually used
+  if (config) {
+    const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
+    set('cfg-server',    config.server);
+    set('cfg-port',      config.port || 5060);
+    set('cfg-wsport',    config.wsPort || 8088);
+    set('cfg-user',      config.username);
+    set('cfg-display',   config.displayName || '');
+    // Transport select
+    const sel = document.getElementById('cfg-transport');
+    if (sel && config.transport) {
+      for (const opt of sel.options) {
+        if (opt.value === config.transport) { opt.selected = true; break; }
+      }
+    }
+    // Show registered identity in banner
+    const txt = document.getElementById('reg-locked-text');
+    if (txt) txt.textContent = `${config.username}@${config.server}`;
+  }
+}
+
+function unlockRegForm() {
+  const form   = document.getElementById('reg-form');
+  const banner = document.getElementById('reg-locked-banner');
+  if (!form) return;
+  form.classList.remove('reg-form-locked');
+  banner.classList.remove('show');
+}
+
 function setHeaderBadge(id, cls) {
   const el = document.getElementById(id);
   el.className = 'status-badge ' + cls;
@@ -1360,23 +1482,27 @@ async function loadHistory() {
     return;
   }
   list.innerHTML = r.history.map(h => {
-    const dur = h.duration != null
+    const dur  = h.duration != null
       ? `${Math.floor(h.duration/60)}m ${h.duration%60}s`
-      : h.status === 'active' ? 'active' : '—';
-    const time = h.startTime ? new Date(h.startTime).toLocaleString() : '';
+      : h.status === 'active' ? 'active…' : '—';
+    const d    = h.startTime ? new Date(h.startTime) : null;
+    const time = d ? d.toLocaleDateString([], {day:'2-digit',month:'2-digit',year:'2-digit'})
+                   + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
     const cap  = h.captureFile
-      ? `<a href="${h.captureFile}" download style="color:var(--blue);font-family:var(--mono);font-size:11px;font-weight:300;text-decoration:none;">↓ pcap</a>`
+      ? `<a href="${h.captureFile}" download style="color:var(--blue);font-family:var(--mono);font-size:10px;font-weight:400;text-decoration:none;flex-shrink:0;">↓ pcap</a>`
       : '';
+    const dirArrow = h.direction === 'inbound' ? '↙' : '↗';
+    const dirLabel = h.direction === 'inbound' ? 'Inbound' : 'Outbound';
+    const name     = h.displayName && h.displayName !== h.target ? h.displayName : (h.target || '—');
     return `<div class="history-item">
-      <div class="history-row">
-        <span class="history-dir ${h.direction}">${h.direction === 'inbound' ? '↙' : '↗'} ${h.direction.charAt(0).toUpperCase()+h.direction.slice(1)}</span>
-        <span class="history-target">${h.displayName || h.target}</span>
+      <div class="history-row-1">
+        <span class="history-dir ${h.direction}">${dirArrow} ${dirLabel}</span>
+        <span class="history-target" title="${h.target || ''}">${name}</span>
         <span class="history-status ${h.status}">${h.status.charAt(0).toUpperCase()+h.status.slice(1)}</span>
       </div>
-      <div class="history-meta">
-        <span>${h.target || ''}</span>
-        <span>${dur}</span>
-        <span>${time}</span>
+      <div class="history-row-2">
+        <span class="history-duration">${dur}</span>
+        <span class="history-time">${time}</span>
         ${cap}
       </div>
     </div>`;
