@@ -10,12 +10,12 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 ┌─────────────────────────────────────────────────────────────┐
 │                      Docker / Podman Container              │
 │                                                             │
-│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐  │
-│  │  Express    │   │  SipManager  │   │ CaptureManager  │  │
-│  │  REST API   │◄─►│  (JsSIP/WS)  │   │ (pure Node pcap)│  │
-│  │  :3000      │   │              │   └────────┬────────┘  │
-│  └──────┬──────┘   └──────┬───────┘            │           │
-│         │                 │            ┌────────▼────────┐  │
+│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐   │
+│  │  Express    │   │  SipManager  │   │ CaptureManager  │   │
+│  │  REST API   │◄─►│  (JsSIP/WS)  │   │ (pure Node pcap)│   │
+│  │  :3000      │   │              │   └────────┬────────┘   │
+│  └──────┬──────┘   └──────┬───────┘            │            │
+│         │                 │            ┌───────▼────-────┐  │
 │  ┌──────▼─────────────────▼──────────┐ │  AudioDecoder   │  │
 │  │       WebSocket Server            │ │ G.722/PCMU/PCMA │  │
 │  └──────────────┬────────────────────┘ │  → WAV file     │  │
