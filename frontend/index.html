@@ -764,6 +764,117 @@
 
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+
+    /* ── Stats panel ────────────────── */
+    .stats-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      margin-bottom: 10px;
+      box-shadow: var(--shadow-sm);
+      display: none;
+    }
+    .stats-panel.visible { display: block; }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .stat-item { text-align: center; }
+    .stat-value {
+      font-family: var(--mono);
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--blue);
+      line-height: 1.2;
+    }
+    .stat-label {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .stat-codec {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--green);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .stat-codec-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 6px rgba(5,150,105,0.5);
+      animation: badge-pulse 2s infinite;
+    }
+
+    /* ── Recording indicator ────────── */
+    .rec-indicator {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--red);
+      padding: 4px 10px;
+      background: var(--red-light);
+      border: 1px solid #fca5a5;
+      border-radius: 20px;
+    }
+    .rec-indicator.active { display: inline-flex; }
+    .rec-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--red);
+      animation: badge-pulse 1s infinite;
+    }
+
+    /* ── Audio player bar ────────────── */
+    .audio-bar {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      background: var(--blue-light);
+      border: 1px solid var(--blue-mid);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--blue);
+    }
+    .audio-bar.active { display: flex; }
+    .audio-viz {
+      display: flex;
+      gap: 2px;
+      align-items: center;
+      height: 20px;
+    }
+    .audio-viz span {
+      width: 3px;
+      background: var(--blue);
+      border-radius: 2px;
+      animation: viz-bounce 0.8s ease-in-out infinite;
+    }
+    .audio-viz span:nth-child(2) { animation-delay: 0.1s; }
+    .audio-viz span:nth-child(3) { animation-delay: 0.2s; }
+    .audio-viz span:nth-child(4) { animation-delay: 0.3s; }
+    .audio-viz span:nth-child(5) { animation-delay: 0.4s; }
+    @keyframes viz-bounce {
+      0%,100% { height: 4px; }
+      50%      { height: 18px; }
+    }
+
+    /* Keepalive indicator in header */
+    .keepalive-status { font-size: 10px; color: var(--text-dim); font-family: var(--mono); }
+    .keepalive-status.ok   { color: var(--green); }
+    .keepalive-status.fail { color: var(--red); }
   </style>
 </head>
 <body>
@@ -890,11 +1001,41 @@
         </div>
       </div>
 
+      <!-- Live audio indicator -->
+      <div class="audio-bar" id="audio-bar">
+        <div class="audio-viz">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        Live Audio
+        <span style="margin-left:auto;font-size:11px;font-weight:400;" id="audio-sr"></span>
+      </div>
+
       <div class="call-display-card">
         <div id="call-status-label">Ready</div>
         <div id="call-target">—</div>
         <div id="call-duration"></div>
-        <div id="call-badge"></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+          <div id="call-badge"></div>
+          <div class="rec-indicator" id="rec-indicator"><div class="rec-dot"></div>REC</div>
+        </div>
+      </div>
+
+      <!-- RTP stats panel -->
+      <div class="stats-panel" id="stats-panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <div class="stat-codec"><div class="stat-codec-dot"></div><span id="stat-codec">—</span></div>
+          <div style="font-size:10px;color:var(--text-dim);font-family:var(--mono);" id="stat-elapsed"></div>
+        </div>
+        <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:6px;">
+          <div class="stat-item"><div class="stat-value" id="stat-rx">—</div><div class="stat-label">RX pkts</div></div>
+          <div class="stat-item"><div class="stat-value" id="stat-loss" style="color:var(--green);">0%</div><div class="stat-label">Loss</div></div>
+          <div class="stat-item"><div class="stat-value" id="stat-jitter">—</div><div class="stat-label">Jitter ms</div></div>
+        </div>
+        <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);">
+          <div class="stat-item"><div class="stat-value" id="stat-tx">—</div><div class="stat-label">TX pkts</div></div>
+          <div class="stat-item"><div class="stat-value" id="stat-kbps">—</div><div class="stat-label">RX kbps</div></div>
+          <div class="stat-item"><div class="stat-value" id="stat-tx-kbps">—</div><div class="stat-label">TX kbps</div></div>
+        </div>
       </div>
     </div>
 
@@ -921,12 +1062,17 @@
       </div>
     </div>
 
-    <!-- Hold / Resume -->
+    <!-- Hold / Resume / Record -->
     <div class="section">
       <div class="section-title">Hold & Resume</div>
-      <div class="action-row">
+      <div class="action-row" style="margin-bottom:8px;">
         <button class="btn btn-warn"    id="btn-hold"   onclick="doHold()">⏸ Hold</button>
         <button class="btn btn-outline" id="btn-resume" onclick="doResume()" style="display:none;">▶ Resume</button>
+      </div>
+      <div class="action-row">
+        <button class="btn btn-outline btn-full" id="btn-record-start" onclick="doRecordStart()">⏺ Record</button>
+        <button class="btn btn-danger btn-full"  id="btn-record-stop"  onclick="doRecordStop()" style="display:none;">■ Stop Rec</button>
+        <button class="btn btn-outline btn-full" id="btn-audio-listen" onclick="toggleAudio()">🔊 Listen</button>
       </div>
     </div>
 
@@ -1108,11 +1254,20 @@ function onIncomingCall(data) {
   setHeaderBadge('call-badge-header','call-active');
   setLabel('call-label','Incoming');
   addLog('warn',`Incoming call from ${data.displayName || data.from}`);
+  startRingtone();
+  showBrowserNotif(
+    'Incoming Call',
+    `${data.displayName || data.from}`,
+    null
+  );
 }
 
 function onCallConnected(data) {
   state.activeCall = { ...state.activeCall, status: 'connected' };
   startCallTimer();
+  startStatsPolling();
+  stopRingtone();
+  playTone(880, 0.12, 0.15);
   setHeaderBadge('call-badge-header','call-active');
   setLabel('call-label','Active Call');
   setBadge('connected','Connected');
@@ -1125,6 +1280,11 @@ function onCallConnected(data) {
 function onCallEnded(data) {
   state.activeCall = null; state.incomingCall = null;
   stopCallTimer(); resetCallUI(); hideIncoming();
+  stopStatsPolling();
+  stopAudio();
+  stopRingtone();
+  resetRecordingUI();
+  playTone(440, 0.3, 0.1);
   setHeaderBadge('call-badge-header','call-idle');
   setLabel('call-label','Idle');
   onConfEnded();
@@ -1532,9 +1692,258 @@ function toggleLog() {
   }
 }
 
+// ─── Web Audio — inbound call playback ────────────────────────────────────────
+let audioWs         = null;
+let audioCtx        = null;
+let audioListening  = false;
+let audioQueue      = [];
+let audioPlaying    = false;
+let audioSampleRate = 16000;
+let statsInterval   = null;
+
+function toggleAudio() {
+  if (audioListening) {
+    stopAudio();
+    document.getElementById('btn-audio-listen').textContent = '🔊 Listen';
+  } else {
+    startAudio();
+    document.getElementById('btn-audio-listen').textContent = '🔇 Mute';
+  }
+}
+
+function startAudio() {
+  if (audioListening) return;
+  audioListening = true;
+
+  // Request permission if needed
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  audioWs = new WebSocket(`${proto}://${location.host}/audio`);
+  audioWs.binaryType = 'arraybuffer';
+
+  audioWs.onopen  = () => {
+    addLog('info', 'Audio relay connected');
+    document.getElementById('audio-bar').classList.add('active');
+  };
+
+  audioWs.onclose = () => {
+    if (audioListening) addLog('warn', 'Audio relay disconnected');
+    document.getElementById('audio-bar').classList.remove('active');
+  };
+
+  audioWs.onmessage = (e) => {
+    const data = new Uint8Array(e.data);
+    if (data.length < 5) return;
+
+    // Parse header: [pt:1][sampleRate:4 LE][pcm16...]
+    const pt         = data[0];
+    const sampleRate = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
+    const pcmBytes   = data.slice(5);
+
+    audioSampleRate = sampleRate;
+    document.getElementById('audio-sr').textContent = `${sampleRate / 1000}kHz`;
+
+    // Convert Int16 LE bytes to float32 for Web Audio API
+    const samples  = pcmBytes.length / 2;
+    const float32  = new Float32Array(samples);
+    const view     = new DataView(pcmBytes.buffer, pcmBytes.byteOffset);
+    for (let i = 0; i < samples; i++) {
+      float32[i] = view.getInt16(i * 2, true) / 32768;
+    }
+
+    audioQueue.push({ float32, sampleRate });
+    if (!audioPlaying) drainAudio();
+  };
+}
+
+let nextAudioTime = 0;
+
+function drainAudio() {
+  if (!audioCtx || audioQueue.length === 0) { audioPlaying = false; return; }
+  audioPlaying = true;
+
+  const { float32, sampleRate } = audioQueue.shift();
+  const buf    = audioCtx.createBuffer(1, float32.length, sampleRate);
+  buf.copyToChannel(float32, 0);
+
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+
+  const now  = audioCtx.currentTime;
+  const when = Math.max(now, nextAudioTime);
+  src.start(when);
+  nextAudioTime = when + buf.duration;
+
+  src.onended = () => drainAudio();
+}
+
+function stopAudio() {
+  audioListening = false;
+  audioQueue = [];
+  audioPlaying = false;
+  nextAudioTime = 0;
+  if (audioWs) { try { audioWs.close(); } catch(e){} audioWs = null; }
+  document.getElementById('audio-bar').classList.remove('active');
+}
+
+// ─── RTP Stats polling ────────────────────────────────────────────────────────
+function startStatsPolling() {
+  stopStatsPolling();
+  document.getElementById('stats-panel').classList.add('visible');
+  statsInterval = setInterval(async () => {
+    try {
+      const r = await api('GET', '/api/stats');
+      if (r.error) return;
+      document.getElementById('stat-codec').textContent    = r.codec  || '—';
+      document.getElementById('stat-rx').textContent       = r.rxPackets;
+      document.getElementById('stat-tx').textContent       = r.txPackets;
+      document.getElementById('stat-jitter').textContent   = r.jitterMs;
+      document.getElementById('stat-kbps').textContent     = r.rxKbps;
+      document.getElementById('stat-tx-kbps').textContent  = r.txKbps;
+      document.getElementById('stat-elapsed').textContent  = fmtDur(r.elapsed);
+      const lossEl = document.getElementById('stat-loss');
+      lossEl.textContent  = r.lossPercent + '%';
+      lossEl.style.color  = parseFloat(r.lossPercent) > 5 ? 'var(--red)' : 'var(--green)';
+    } catch(e) {}
+  }, 2000);
+}
+
+function stopStatsPolling() {
+  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+  document.getElementById('stats-panel').classList.remove('visible');
+  ['stat-codec','stat-rx','stat-tx','stat-loss','stat-jitter','stat-kbps','stat-tx-kbps','stat-elapsed']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.textContent = '—'; });
+}
+
+function fmtDur(s) {
+  if (!s) return '';
+  const m = Math.floor(s / 60), sec = s % 60;
+  return `${m}m ${sec}s`;
+}
+
+// ─── Recording toggle ─────────────────────────────────────────────────────────
+async function doRecordStart() {
+  const r = await api('POST', '/api/record/start');
+  if (r.error) { addLog('error', r.error); return; }
+  document.getElementById('btn-record-start').style.display = 'none';
+  document.getElementById('btn-record-stop').style.display  = '';
+  document.getElementById('rec-indicator').classList.add('active');
+  addLog('info', `Recording started: ${r.file || ''}`);
+}
+
+async function doRecordStop() {
+  const r = await api('POST', '/api/record/stop');
+  if (r.error) { addLog('error', r.error); return; }
+  document.getElementById('btn-record-start').style.display = '';
+  document.getElementById('btn-record-stop').style.display  = 'none';
+  document.getElementById('rec-indicator').classList.remove('active');
+  addLog('info', `Recording saved${r.audioFile ? ': ' + r.audioFile : ''}`);
+  setTimeout(loadCaptures, 1000);
+}
+
+function resetRecordingUI() {
+  document.getElementById('btn-record-start').style.display = '';
+  document.getElementById('btn-record-stop').style.display  = 'none';
+  document.getElementById('rec-indicator').classList.remove('active');
+}
+
+// ─── Notification sounds + Browser notifications ──────────────────────────────
+let notifEnabled = false;
+let ringtoneOsc  = null;
+let ringtoneInt  = null;
+
+// Request browser notification permission proactively
+function requestNotifPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().then(p => {
+      notifEnabled = (p === 'granted');
+      addLog('info', `Browser notifications ${notifEnabled ? 'enabled' : 'denied'}`);
+    });
+  } else {
+    notifEnabled = ('Notification' in window && Notification.permission === 'granted');
+  }
+}
+
+function showBrowserNotif(title, body, icon) {
+  if (!notifEnabled || document.hasFocus()) return;
+  try {
+    const n = new Notification(title, { body, icon: icon || '' });
+    setTimeout(() => n.close(), 8000);
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch(e) {}
+}
+
+// Synthesize a ringtone using Web Audio oscillator
+function startRingtone() {
+  stopRingtone();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const playRing = () => {
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(480, ctx.currentTime);
+    osc.frequency.setValueAtTime(440, ctx.currentTime + 0.25);
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.5);
+  };
+  playRing();
+  ringtoneInt = setInterval(playRing, 3000);
+}
+
+function stopRingtone() {
+  if (ringtoneInt) { clearInterval(ringtoneInt); ringtoneInt = null; }
+}
+
+// Short beep for call connected / ended
+function playTone(freq, duration, vol) {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = freq || 880;
+    gain.gain.setValueAtTime(vol || 0.2, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + (duration || 0.15));
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + (duration || 0.15));
+  } catch(e) {}
+}
+
+function onKeepalive(data) {
+  // Silently track — only log failures
+  if (!data.ok) addLog('warn', `Keepalive failed: ${data.cause || ''} — re-registering`);
+}
+
+function onIpChanged(data) {
+  addLog('warn', `IP changed: ${data.oldIp} → ${data.newIp} — re-registering`);
+}
+
+function onRecordingStarted(data) {
+  document.getElementById('btn-record-start').style.display = 'none';
+  document.getElementById('btn-record-stop').style.display  = '';
+  document.getElementById('rec-indicator').classList.add('active');
+}
+
+function onRecordingStopped(data) {
+  document.getElementById('btn-record-start').style.display = '';
+  document.getElementById('btn-record-stop').style.display  = 'none';
+  document.getElementById('rec-indicator').classList.remove('active');
+  if (data.audioFile) addLog('info', `Recording: ${data.audioFile}`);
+  setTimeout(loadCaptures, 1000);
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 connectWS();
 addLog('info','SIP Endpoint UI initialised');
+requestNotifPermission();
 document.getElementById('dial-target').addEventListener('keydown', e => { if(e.key==='Enter') doCall(); });
 </script>
 </body>
