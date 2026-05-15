@@ -263,16 +263,28 @@ function convertToUlaw8k(raw, fmt) {
 // ─── RTP bridge ──────────────────────────────────────────────────────────────
 class RtpBridge {
   constructor(localPort, remoteIp, remotePort, callId) {
-    this.localPort  = localPort;
-    this.remoteIp   = remoteIp;
-    this.remotePort = remotePort;
-    this.callId     = callId;
-    this.localIp    = getLocalIp();
-    this.socket     = null;
-    this.ssrc       = (Math.random() * 0xffffffff) >>> 0;
-    this.seq        = (Math.random() * 0xffff)     >>> 0;
-    this.timestamp  = (Math.random() * 0xffffffff) >>> 0;
-    this.playTimer  = null;
+    this.localPort   = localPort;
+    this.remoteIp    = remoteIp;
+    this.remotePort  = remotePort;
+    this.callId      = callId;
+    this.localIp     = getLocalIp();
+    this.socket      = null;
+    this.ssrc        = (Math.random() * 0xffffffff) >>> 0;
+    this.seq         = (Math.random() * 0xffff)     >>> 0;
+    this.timestamp   = (Math.random() * 0xffffffff) >>> 0;
+    this.playTimer   = null;
+    // RTP stats
+    this.stats = {
+      rxPackets: 0, txPackets: 0, rxBytes: 0, txBytes: 0,
+      lostPackets: 0, lastSeqRx: null,
+      jitterMs: 0, lastArrival: null, lastTs: null,
+      codec: null, startTime: null
+    };
+    // Audio relay: set to fn(pt, pcm16Buffer) to receive decoded inbound audio
+    this.onAudio  = null;
+    // On-demand recording flag (distinct from always-on audioWriter)
+    this.recording = false;
+    this._g722dec  = null;
   }
 
   start() {
@@ -283,31 +295,72 @@ class RtpBridge {
     this.lastSeq    = null;
     this.lastTs     = null;
 
+    this.stats.startTime = Date.now();
+
     this.socket.on('message', (msg, rinfo) => {
       captureManager.writeRtpPacket(this.callId, rinfo.address, rinfo.port, this.localIp, this.localPort, msg);
 
-      // Parse incoming RTP header to track stream state
       if (msg.length >= 12) {
-        this.remoteSSRC = msg.readUInt32BE(8);
-        this.lastSeq    = msg.readUInt16BE(2);
-        this.lastTs     = msg.readUInt32BE(4);
-        // Sync our outgoing counters to the incoming stream
-        // so playback continues seamlessly from where the stream left off
+        const seq  = msg.readUInt16BE(2);
+        const ts   = msg.readUInt32BE(4);
+        const ssrc = msg.readUInt32BE(8);
+        const pt   = msg[1] & 0x7f;
+
+        // Codec detection
+        if (!this.stats.codec) {
+          const map = { 0: 'PCMU/8kHz', 8: 'PCMA/8kHz', 9: 'G722/16kHz', 18: 'G729/8kHz' };
+          this.stats.codec = map[pt] || `PT${pt}`;
+        }
+
+        // Packet loss (sequence gap)
+        if (this.stats.lastSeqRx !== null) {
+          const expected = (this.stats.lastSeqRx + 1) & 0xffff;
+          if (seq !== expected) {
+            const gap = (seq - expected + 0x10000) & 0xffff;
+            if (gap < 1000) this.stats.lostPackets += gap;
+          }
+        }
+        this.stats.lastSeqRx = seq;
+
+        // Jitter (RFC 3550 simplified)
+        const now = Date.now();
+        if (this.stats.lastArrival !== null && this.stats.lastTs !== null) {
+          const arrivalDelta = now - this.stats.lastArrival;
+          const sendDelta    = ((ts - this.stats.lastTs + 0x100000000) % 0x100000000) / 8;
+          const d = Math.abs(arrivalDelta - sendDelta);
+          this.stats.jitterMs = Math.round(this.stats.jitterMs + (d - this.stats.jitterMs) / 16);
+        }
+        this.stats.lastArrival = now;
+        this.stats.lastTs      = ts;
+        this.stats.rxPackets++;
+        this.stats.rxBytes += msg.length;
+
+        this.remoteSSRC = ssrc;
+        this.lastSeq    = seq;
+        this.lastTs     = ts;
+
         if (!this.playing) {
-          this.seq       = this.lastSeq;
-          this.timestamp = this.lastTs;
-          this.ssrc      = this.remoteSSRC;
+          this.seq       = seq;
+          this.timestamp = ts;
+          this.ssrc      = ssrc;
+        }
+
+        // Audio relay to browser
+        if (this.onAudio && !this.playing && !this.held) {
+          this._relayAudio(pt, msg.slice(12));
         }
       }
 
-      // During WAV playback or hold, drop incoming RTP forwarding
+      // During WAV playback or hold, suppress forwarding
       if (this.playing || this.held) return;
 
       this.socket.send(msg, this.remotePort, this.remoteIp);
+      this.stats.txPackets++;
+      this.stats.txBytes += msg.length;
       captureManager.writeRtpPacket(this.callId, this.localIp, this.localPort, this.remoteIp, this.remotePort, msg);
 
-      // Decode inbound RTP to local audio file if recording is active
-      if (this.audioWriter && msg.length > 12) {
+      // On-demand recording: only write when recording flag is set
+      if (this.recording && this.audioWriter && msg.length > 12) {
         const pt      = msg[1] & 0x7f;
         const payload = msg.slice(12);
         this.audioWriter.write(pt, payload);
@@ -335,6 +388,8 @@ class RtpBridge {
       payload.copy(pkt, 12);
 
       this.socket.send(pkt, this.remotePort, this.remoteIp);
+      this.stats.txPackets++;
+      this.stats.txBytes += pkt.length;
       captureManager.writeRtpPacket(
         this.callId, this.localIp, this.localPort,
         this.remoteIp, this.remotePort, pkt
@@ -361,6 +416,8 @@ class RtpBridge {
       payload.copy(pkt, 12);
 
       this.socket.send(pkt, this.remotePort, this.remoteIp);
+      this.stats.txPackets++;
+      this.stats.txBytes += pkt.length;
       captureManager.writeRtpPacket(
         this.callId, this.localIp, this.localPort,
         this.remoteIp, this.remotePort, pkt
@@ -424,6 +481,59 @@ class RtpBridge {
     this.playing = false;
   }
 
+  // Decode inbound RTP payload to 16-bit PCM and relay to onAudio callback
+  _relayAudio(pt, payload) {
+    try {
+      let pcm16;
+      if (pt === 9) {
+        // G.722 → 16kHz 16-bit PCM
+        const { G722Decoder } = require('./audioDecoder');
+        if (!this._g722dec) this._g722dec = new G722Decoder();
+        pcm16 = this._g722dec.decode(payload);
+      } else if (pt === 0) {
+        // PCMU (μ-law) → 8kHz 16-bit PCM
+        pcm16 = Buffer.alloc(payload.length * 2);
+        for (let i = 0; i < payload.length; i++) {
+          const u = ~payload[i] & 0xff;
+          const sign = u & 0x80, exp = (u >> 4) & 0x07, mant = u & 0x0f;
+          let s = ((mant << 1) + 33) << (exp + 2);
+          pcm16.writeInt16LE(Math.max(-32768, Math.min(32767, sign ? -s : s)), i * 2);
+        }
+      } else if (pt === 8) {
+        // PCMA (A-law) → 8kHz 16-bit PCM
+        pcm16 = Buffer.alloc(payload.length * 2);
+        for (let i = 0; i < payload.length; i++) {
+          const a = payload[i] ^ 0x55;
+          const sign = a & 0x80, exp = (a >> 4) & 0x07, mant = a & 0x0f;
+          let s = exp === 0 ? (mant << 1) + 1 : (((mant | 0x10) << 1) + 1) << (exp - 1);
+          s *= 8;
+          pcm16.writeInt16LE(Math.max(-32768, Math.min(32767, sign ? -s : s)), i * 2);
+        }
+      } else { return; }
+      if (this.onAudio) this.onAudio(pt, pcm16);
+    } catch (e) { /* non-fatal */ }
+  }
+
+  // Return live stats snapshot
+  getStats() {
+    const elapsed = this.stats.startTime ? (Date.now() - this.stats.startTime) / 1000 : 0;
+    const total   = this.stats.rxPackets + this.stats.lostPackets;
+    return {
+      codec:       this.stats.codec || 'unknown',
+      rxPackets:   this.stats.rxPackets,
+      txPackets:   this.stats.txPackets,
+      lostPackets: this.stats.lostPackets,
+      lossPercent: total > 0 ? ((this.stats.lostPackets / total) * 100).toFixed(1) : '0.0',
+      jitterMs:    this.stats.jitterMs,
+      rxKbps:      elapsed > 0 ? Math.round((this.stats.rxBytes  * 8) / elapsed / 1000) : 0,
+      txKbps:      elapsed > 0 ? Math.round((this.stats.txBytes  * 8) / elapsed / 1000) : 0,
+      elapsed:     Math.round(elapsed),
+    };
+  }
+
+  startRecording() { this.recording = true;  }
+  stopRecording()  { this.recording = false; }
+
   setHold(held) {
     this.held = held;
     if (held) {
@@ -452,9 +562,12 @@ class SipManager extends EventEmitter {
     this.config       = null;
     this.rtpBridge    = null;
     // Conference: second leg
-    this.confSession  = null;
-    this.confBridge   = null;
-    this.logs         = [];
+    this.confSession      = null;
+    this.confBridge       = null;
+    this.logs             = [];
+    this.keepaliveTimer   = null;
+    this.ipWatchTimer     = null;
+    this.lastKnownIp      = null;
   }
 
   _log(level, message) {
@@ -478,9 +591,15 @@ class SipManager extends EventEmitter {
         wsPath:      this.config.wsPath || '/ws'
       } : null,
       activeCall: this.activeCall ? {
-        callId: this.activeCall.callId, target: this.activeCall.target,
-        direction: this.activeCall.direction, startTime: this.activeCall.startTime,
-        status: this.activeCall.status
+        callId:    this.activeCall.callId,
+        target:    this.activeCall.target,
+        direction: this.activeCall.direction,
+        startTime: this.activeCall.startTime,
+        status:    this.activeCall.status,
+        onHold:    this.activeCall.onHold    || false,
+        recording: this.rtpBridge ? this.rtpBridge.recording : false,
+        codec:     this.rtpBridge ? this.rtpBridge.getStats().codec : null,
+        stats:     this.rtpBridge ? this.rtpBridge.getStats() : null,
       } : null,
       incomingCall: this.incomingCall ? {
         from: this.incomingCall.from, displayName: this.incomingCall.displayName
@@ -518,6 +637,8 @@ class SipManager extends EventEmitter {
         this.registered = true;
         this._log('info', `Registered as ${username}@${server}`);
         this.emit('registered', { username, server, displayName });
+        this._startKeepalive();
+        this._startIpWatch();
         resolve({ registered: true });
       });
       this.ua.on('unregistered', () => { this.registered = false; this._log('info', 'Unregistered'); this.emit('unregistered', {}); });
@@ -631,14 +752,18 @@ class SipManager extends EventEmitter {
 
   _teardown() {
     if (this.rtpBridge) {
-      // Finalise the audio recording
-      if (this.rtpBridge.audioWriter) {
+      // Finalise audio recording only if it was active
+      if (this.rtpBridge.recording && this.rtpBridge.audioWriter) {
         try {
           const info = this.rtpBridge.audioWriter.close();
-          this._log('info', `Audio saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
-        } catch (e) { this._log('warn', `Audio writer close error: ${e.message}`); }
+          this._log('info', `Recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
+        } catch (e) { this._log('warn', `Recording close error: ${e.message}`); }
         this.rtpBridge.audioWriter = null;
+        this.rtpBridge.recording   = false;
       }
+      const stats = this.rtpBridge.getStats();
+      this._log('info', `Call stats — codec:${stats.codec} rx:${stats.rxPackets}pkts tx:${stats.txPackets}pkts lost:${stats.lostPackets} jitter:${stats.jitterMs}ms`);
+      this.rtpBridge.onAudio = null;
       this.rtpBridge.stop();
       this.rtpBridge = null;
     }
@@ -652,6 +777,8 @@ class SipManager extends EventEmitter {
   // ── Unregister ───────────────────────────────────────────────────────────
   unregister() {
     return new Promise((resolve) => {
+      this._stopKeepalive();
+      this._stopIpWatch();
       if (!this.ua) return resolve();
       this.ua.unregister({ all: true });
       this.ua.stop();
@@ -712,7 +839,102 @@ class SipManager extends EventEmitter {
     });
   }
 
-  // ── Hangup ───────────────────────────────────────────────────────────────
+  // ── OPTIONS keepalive ────────────────────────────────────────────────────
+  // Sends SIP OPTIONS to the PBX every 30s. Triggers re-register on failure.
+  _startKeepalive() {
+    this._stopKeepalive();
+    const INTERVAL = 30000;
+    this.keepaliveTimer = setInterval(() => {
+      if (!this.ua || !this.registered || !this.config) return;
+      try {
+        this.ua.sendOptions(`sip:${this.config.server}`, null, {
+          eventHandlers: {
+            succeeded: () => {
+              this.emit('keepalive', { ok: true });
+            },
+            failed: (e) => {
+              this._log('warn', `OPTIONS keepalive failed: ${e.cause} — re-registering`);
+              this.emit('keepalive', { ok: false, cause: e.cause });
+              if (this.ua) this.ua.register();
+            }
+          }
+        });
+      } catch (e) {
+        this._log('warn', `OPTIONS send error: ${e.message}`);
+      }
+    }, INTERVAL);
+    this._log('info', `OPTIONS keepalive started (every ${INTERVAL / 1000}s)`);
+  }
+
+  _stopKeepalive() {
+    if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
+  }
+
+  // ── IP change watch ───────────────────────────────────────────────────────
+  // Polls local IP every 15s. Re-registers when it changes so Contact header
+  // advertises the new IP (important for cloud VMs that get reassigned IPs).
+  _startIpWatch() {
+    this._stopIpWatch();
+    this.lastKnownIp = getLocalIp();
+    this.ipWatchTimer = setInterval(() => {
+      const current = getLocalIp();
+      if (current !== this.lastKnownIp) {
+        const old = this.lastKnownIp;
+        this.lastKnownIp = current;
+        this._log('warn', `IP changed: ${old} → ${current} — re-registering`);
+        this.emit('ipChanged', { oldIp: old, newIp: current });
+        if (this.ua && this.config) this.ua.register();
+      }
+    }, 15000);
+  }
+
+  _stopIpWatch() {
+    if (this.ipWatchTimer) { clearInterval(this.ipWatchTimer); this.ipWatchTimer = null; }
+  }
+
+  // ── On-demand recording ───────────────────────────────────────────────────
+  startRecording() {
+    return new Promise((resolve, reject) => {
+      if (!this.rtpBridge)          return reject(new Error('No active call'));
+      if (this.rtpBridge.recording) return reject(new Error('Already recording'));
+      const path = require('path');
+      const { AudioWriter } = require('./audioDecoder');
+      const id       = this.activeCall?.callId || 'manual';
+      const filePath = path.join(__dirname, '../captures', `rec_${id.slice(0,8)}_${Date.now()}.wav`);
+      this.rtpBridge.audioWriter = new AudioWriter(filePath);
+      this.rtpBridge.startRecording();
+      this._log('info', `Recording started: ${path.basename(filePath)}`);
+      this.emit('recordingStarted', { callId: this.activeCall?.callId });
+      resolve({ recording: true, file: path.basename(filePath) });
+    });
+  }
+
+  stopRecording() {
+    return new Promise((resolve, reject) => {
+      if (!this.rtpBridge)           return reject(new Error('No active call'));
+      if (!this.rtpBridge.recording) return reject(new Error('Not recording'));
+      this.rtpBridge.stopRecording();
+      let audioFile = null;
+      if (this.rtpBridge.audioWriter) {
+        try {
+          const info = this.rtpBridge.audioWriter.close();
+          const path = require('path');
+          audioFile  = `/captures/${this.rtpBridge.audioWriter.filename}`;
+          this._log('info', `Recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
+        } catch (e) { this._log('warn', `Recording save error: ${e.message}`); }
+        this.rtpBridge.audioWriter = null;
+      }
+      this.emit('recordingStopped', { callId: this.activeCall?.callId, audioFile });
+      resolve({ recording: false, audioFile });
+    });
+  }
+
+  // ── RTP stats ─────────────────────────────────────────────────────────────
+  getRtpStats() {
+    return this.rtpBridge ? this.rtpBridge.getStats() : null;
+  }
+
+    // ── Hangup ───────────────────────────────────────────────────────────────
   hangup() {
     return new Promise((resolve) => {
       if (this.session) {

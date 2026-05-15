@@ -336,6 +336,29 @@ app.get('/api/log/export', (req, res) => {
   res.send(lines);
 });
 
+// ── RTP Stats ────────────────────────────────────────────────────────────────
+
+/** GET /api/stats — live RTP stats for the active call */
+app.get('/api/stats', (req, res) => {
+  const stats = sipManager.getRtpStats();
+  if (!stats) return res.status(409).json({ error: 'No active call' });
+  res.json(stats);
+});
+
+// ── Recording toggle ──────────────────────────────────────────────────────────
+
+/** POST /api/record/start */
+app.post('/api/record/start', async (req, res) => {
+  try { const r = await sipManager.startRecording(); res.json({ success: true, ...r }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/** POST /api/record/stop */
+app.post('/api/record/stop', async (req, res) => {
+  try { const r = await sipManager.stopRecording(); res.json({ success: true, ...r }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`SIP Endpoint running on port ${PORT}`));
