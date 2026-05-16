@@ -161,11 +161,22 @@ class CaptureManager extends EventEmitter {
 
   /**
    * Write a SIP message into the capture (as a fake UDP packet).
+   * Always uses port 5060 for src/dst so Wireshark auto-decodes as SIP,
+   * regardless of actual WebSocket transport port.
    */
   writeSipMessage(callId, srcIp, srcPort, dstIp, dstPort, sipText) {
     const writer = this.activeCaptures.get(callId);
-    if (!writer) return;
-    writer.writePacket(srcIp, srcPort, dstIp, dstPort, Buffer.from(sipText, 'utf8'));
+    if (!writer) {
+      console.warn(`[CAPTURE] writeSipMessage: no active capture for ${callId?.slice(0,8)} — msg dropped`);
+      return false;
+    }
+    // Strip WebSocket framing if present (SIP over WS may have ws frame prefix)
+    let text = typeof sipText === 'string' ? sipText : sipText.toString('utf8');
+    // Skip non-SIP content (keepalive pings etc)
+    if (!text.match(/^(SIP\/|INVITE |ACK |BYE |CANCEL |OPTIONS |REGISTER |REFER |NOTIFY |INFO )/)) return false;
+    // Always write on port 5060 so Wireshark dissects as SIP
+    writer.writePacket(srcIp, 5060, dstIp, 5060, Buffer.from(text, 'utf8'));
+    return true;
   }
 
   /**

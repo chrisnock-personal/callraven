@@ -357,7 +357,8 @@ class RtpBridge {
       this.socket.send(msg, this.remotePort, this.remoteIp);
       this.stats.txPackets++;
       this.stats.txBytes += msg.length;
-      captureManager.writeRtpPacket(this.callId, this.localIp, this.localPort, this.remoteIp, this.remotePort, msg);
+      // Note: we don't write the forwarded copy to avoid duplicate packets in pcap.
+      // The inbound packet is already captured above (rinfo → localPort).
 
       // On-demand recording: only write when recording flag is set
       if (this.recording && this.audioWriter && msg.length > 12) {
@@ -649,44 +650,235 @@ class SipManager extends EventEmitter {
         this.emit('registrationFailed', { cause });
         reject(new Error(`Registration failed: ${cause}`));
       });
-      this.ua.on('connected',    () => this._log('info', `WebSocket connected to ${wsUri}`));
+      this.ua.on('connected',    () => {
+        this._log('info', `WebSocket connected to ${wsUri}`);
+        // Hook WS message stream to capture 200 OK responses
+        // (JsSIP doesn't expose 200 OK on session events for outbound calls)
+        setTimeout(() => {
+          try {
+            const transport = this.ua?._transport;
+            const ws = transport?._ws || transport?.ws || transport?._socket;
+
+            // Diagnostic: log what we find
+            // transport.socket is JsSIP's WebSocketInterface
+            // transport.ondata is the callback JsSIP fires for every inbound message
+            if (transport._ok200hooked) return;
+
+            const handleSipResponse = (text) => {
+              if (!text || !text.startsWith('SIP/2.0')) return;
+              const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
+              if (firstLine.includes(' 180 ')) return; // captured via progress event
+              const callId = this._pendingCallId || this.activeCall?.callId;
+              if (!callId) return;
+              captureManager.writeSipMessage(callId, this.config?.server || '', 5060, getLocalIp(), 5060, text);
+              this._log('info', `[CAP] Inbound SIP: ${firstLine}`);
+            };
+
+            // Hook transport.ondata — JsSIP calls this for every inbound WS message
+            if (typeof transport.ondata === 'function') {
+              const origOnData = transport.ondata.bind(transport);
+              transport.ondata = (transport_ref, url, msg, binary) => {
+                origOnData(transport_ref, url, msg, binary);
+                const text = typeof msg === 'string' ? msg
+                           : Buffer.isBuffer(msg) ? msg.toString('utf8') : null;
+                if (text) handleSipResponse(text);
+              };
+              transport._ok200hooked = true;
+              this._log('info', '[CAP] Hooked via transport.ondata');
+            }
+
+            // Also try the raw socket inside WebSocketInterface
+            const rawWs = transport.socket?._ws
+                       || transport.socket?.ws
+                       || transport.socket?._socket
+                       || transport.socket?.socket;
+            if (rawWs && typeof rawWs.on === 'function' && !rawWs._ok200hooked) {
+              rawWs.on('message', (data) => {
+                const text = typeof data === 'string' ? data
+                           : Buffer.isBuffer(data) ? data.toString('utf8') : null;
+                if (text) handleSipResponse(text);
+              });
+              rawWs._ok200hooked = true;
+              this._log('info', '[CAP] Hooked via transport.socket raw WS');
+            }
+
+            if (!transport._ok200hooked) {
+              this._log('warn', '[CAP] Could not hook inbound SIP — 100/200 will be missing from pcap');
+            }
+
+            if (!ws) return;
+            if (ws._ok200hooked) { this._log('info', '[CAP] Already hooked'); return; }
+
+            const handleMsg = (data) => {
+              const text = typeof data === 'string' ? data
+                         : Buffer.isBuffer(data)   ? data.toString('utf8')
+                         : typeof data?.toString === 'function' ? data.toString() : null;
+              if (!text || !text.startsWith('SIP/2.0')) return;
+              const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
+              if (firstLine.includes(' 180 ')) return; // skip 180, captured via progress
+              const callId = this._pendingCallId || this.activeCall?.callId;
+              if (!callId) return;
+              const localIp = getLocalIp();
+              captureManager.writeSipMessage(callId, this.config?.server || '', 5060, localIp, 5060, text);
+              this._log('info', `[CAP] WS response: ${firstLine}`);
+            };
+
+            // Try all listener attachment methods
+            let attached = false;
+            if (typeof ws.on === 'function') {
+              ws.on('message', handleMsg);
+              attached = true;
+              this._log('info', '[CAP] Hooked via ws.on(message)');
+            }
+            if (!attached && typeof ws.addEventListener === 'function') {
+              ws.addEventListener('message', (evt) => handleMsg(evt.data));
+              attached = true;
+              this._log('info', '[CAP] Hooked via ws.addEventListener(message)');
+            }
+            if (!attached) {
+              // Wrap onmessage as last resort
+              const orig = ws.onmessage;
+              ws.onmessage = (evt) => {
+                if (orig) orig.call(ws, evt);
+                handleMsg(evt?.data || evt);
+              };
+              attached = true;
+              this._log('info', '[CAP] Hooked via ws.onmessage wrap');
+            }
+
+            if (attached) ws._ok200hooked = true;
+          } catch(e) {
+            this._log('warn', `[CAP] Hook failed: ${e.message}\n${e.stack}`);
+          }
+        }, 200);
+      });
       this.ua.on('disconnected', (e) => this._log('warn', `WebSocket disconnected: ${e?.cause || ''}`));
       this.ua.on('newRTCSession', (data) => this._handleNewSession(data.session));
-
-      // Hook JsSIP transport to capture ALL outgoing SIP messages
-      this.ua.on('connected', () => {
-        try {
-          const transport = this.ua._transport;
-          if (transport && transport._ws) {
-            const origSend = transport._ws.send.bind(transport._ws);
-            transport._ws.send = (data) => {
-              origSend(data);
-              // Write SIP message to active call capture if one exists
-              if (this.activeCall) {
-                const localIp = getLocalIp();
-                captureManager.writeSipMessage(
-                  this.activeCall.callId,
-                  localIp, 5060,
-                  server, wsPort,
-                  typeof data === 'string' ? data : data.toString()
-                );
-              }
-            };
-            this._log('info', 'SIP transport hooked for capture');
-          }
-        } catch (e) {
-          this._log('warn', `Transport hook failed: ${e.message}`);
-        }
-      });
 
       this.ua.start();
       setTimeout(() => { if (!this.registered) reject(new Error('Registration timeout after 30s')); }, 30000);
     });
   }
 
+  // ── SIP capture via JsSIP session events ─────────────────────────────────
+  // Capture SIP signalling by listening to JsSIP session events which expose
+  // the raw SIP message objects — far more reliable than intercepting WebSocket.
+  // Called from _handleNewSession for each call leg.
+  _hookSessionCapture(session) {
+    const getSipText = (msg) => {
+      try {
+        if (!msg) return null;
+        // JsSIP IncomingMessage/OutgoingRequest have a toString()
+        if (typeof msg.toString === 'function') {
+          const t = msg.toString();
+          if (t && t.length > 10 && t !== '[object Object]') return t;
+        }
+        // Some events pass the raw data
+        if (typeof msg.data === 'string' && msg.data.length > 10) return msg.data;
+        // Try _message property (JsSIP wraps in some cases)
+        if (msg._message) return getSipText(msg._message);
+        return null;
+      } catch(e) { return null; }
+    };
+
+    const write = (msg, fromServer) => {
+      const callId  = this._pendingCallId || this.activeCall?.callId;
+      const text    = getSipText(msg);
+      if (!callId || !text) return;
+      const localIp = getLocalIp();
+      const server  = this.config?.server || '';
+      if (fromServer) {
+        captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, text);
+      } else {
+        captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, text);
+      }
+    };
+
+    // Outbound: INVITE, ACK, re-INVITE, BYE, OPTIONS
+    // 'sending' fires for ALL outbound SIP requests — most reliable capture point
+    session.on('sending', (e) => {
+      const method = e?.request?.method || e?.request?.ruri || 'unknown';
+      this._log('info', `[CAP] sending method=${method}`);
+      write(e.request, false);
+    });
+
+    // Inbound provisional responses: 100 Trying, 180 Ringing
+    // originator='remote' means Asterisk sent it; originator='local' is our own 100
+    session.on('progress', (e) => {
+      if (e?.originator === 'remote') {
+        write(e.response || e.message, true);
+      }
+    });
+
+    // 200 OK + ACK — captured by intercepting the session internals
+    // We store the 200 OK when progress fires (last response before confirmed)
+    // and the ACK by wrapping session._sendACK if it exists
+    session.on('progress', (e) => {
+      if (e?.originator === 'remote' && e?.response) {
+        // Store last response — the final one will be the 200 OK
+        session._lastCapturedResponse = e.response;
+      }
+    });
+
+    session.on('confirmed', (e) => {
+      // 200 OK captured via WebSocket message listener above
+      // ACK: build from dialog state (same approach as BYE)
+      const callId  = this._pendingCallId || this.activeCall?.callId;
+      if (!callId) return;
+      const localIp = getLocalIp();
+      const server  = this.config?.server || '';
+      try {
+        const dialog    = session._dialog;
+        if (!dialog) return;
+        const uriToStr  = (u) => {
+          if (!u) return null;
+          if (typeof u === 'string' && u.includes('sip:')) return u;
+          try { const s = u.toString(); if (s.includes('sip:')) return s; } catch(ex) {}
+          return null;
+        };
+        const localUri  = uriToStr(dialog.local_uri)  || `sip:${this.config.username}@${server}`;
+        const remoteUri = uriToStr(dialog.remote_uri)  || this.activeCall?.target || `sip:unknown@${server}`;
+        const dialogId  = dialog.id || {};
+        const callIdSip = String(dialogId.call_id   || '');
+        const localTag  = String(dialogId.local_tag  || '');
+        const remoteTag = String(dialogId.remote_tag || '');
+        const cseq      = (dialog.local_seqnum || 1);
+        const CRLF      = '\r\n';
+        const ackText   = [
+          `ACK ${remoteUri} SIP/2.0`,
+          `Via: SIP/2.0/WS ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
+          `Max-Forwards: 70`,
+          `From: <${localUri}>;tag=${localTag}`,
+          `To: <${remoteUri}>;tag=${remoteTag}`,
+          `Call-ID: ${callIdSip}`,
+          `CSeq: ${cseq} ACK`,
+          `Content-Length: 0`,
+          ``, ``
+        ].join(CRLF);
+        captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, ackText);
+        this._log('info', `[CAP] ACK written (${ackText.slice(0,30)})`);
+      } catch(ex) { this._log('warn', `[CAP] ACK capture error: ${ex.message}`); }
+    });
+
+    // In-dialog requests (re-INVITE, hold, etc.)
+    session.on('reinvite', (e) => {
+      if (e?.originator === 'remote') write(e.request, true);
+      else write(e.request, false);
+    });
+    session.on('update', (e) => {
+      if (e?.originator === 'remote') write(e.request, true);
+      else write(e.request, false);
+    });
+
+    // BYE and failed responses are captured directly in _handleNewSession
+    // before _teardown() closes the capture file — so we don't duplicate here
+  }
+
   // ── Session wiring ────────────────────────────────────────────────────────
   _handleNewSession(session) {
     this._log('info', `New session direction=${session.direction}`);
+    // Hook session events for SIP capture (reliable — uses JsSIP's own objects)
+    this._hookSessionCapture(session);
     if (session.direction === 'incoming') {
       const inviteRequest = session._request || null;
       const remoteSdp     = inviteRequest?.body || null;
@@ -713,6 +905,18 @@ class SipManager extends EventEmitter {
     session.on('ended', (e) => {
       this._log('info', `Call ended: ${e.cause || 'normal'}`);
       const callId = this.activeCall?.callId;
+      // Capture remote BYE (local BYE already captured by _captureOutboundBye)
+      if (callId && e?.originator === 'remote' && e?.message) {
+        try {
+          const byeText = e.message.toString ? e.message.toString() : null;
+          if (byeText && byeText.length > 10 && !byeText.startsWith('[object')) {
+            const localIp = getLocalIp();
+            const server  = this.config?.server || '';
+            captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, byeText);
+            this._log('info', '[CAP] Remote BYE written');
+          }
+        } catch(ex) { this._log('warn', `BYE capture error: ${ex.message}`); }
+      }
       if (callId) callHistory.endCall(callId, { status: 'completed' });
       this._teardown();
       this.emit('callEnded', { callId, cause: e.cause });
@@ -720,6 +924,18 @@ class SipManager extends EventEmitter {
     session.on('failed', (e) => {
       this._log('error', `Call failed: ${e.cause || 'unknown'}`);
       const callId = this.activeCall?.callId;
+      // Write failure response before teardown closes the capture
+      if (callId && (e?.message || e?.response)) {
+        try {
+          const msg  = e.message || e.response;
+          const text = msg.toString ? msg.toString() : null;
+          if (text && text.length > 10) {
+            const localIp = getLocalIp();
+            const server  = this.config?.server || '';
+            captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, text);
+          }
+        } catch(ex) { /* ignore */ }
+      }
       if (callId) callHistory.failCall(callId);
       this._teardown();
       this.emit('callFailed', { callId, cause: e.cause });
@@ -769,9 +985,10 @@ class SipManager extends EventEmitter {
     }
     if (this.confBridge)  { this.confBridge.stop();   this.confBridge  = null; }
     if (this.confSession) { try { this.confSession.terminate(); } catch(e){} this.confSession = null; }
-    this.session      = null;
-    this.activeCall   = null;
-    this.incomingCall = null;
+    this.session        = null;
+    this.activeCall     = null;
+    this.incomingCall   = null;
+    this._pendingCallId = null;
   }
 
   // ── Unregister ───────────────────────────────────────────────────────────
@@ -802,12 +1019,12 @@ class SipManager extends EventEmitter {
         this.session = this.ua.call(targetUri, { mediaConstraints: { audio: false, video: false } });
         this.session.on('sending', (e) => {
           if (e.request) {
-            captureManager.writeSipMessage(callId, localIp, 5060, this.config.server, this.config.wsPort || 8088,
-              e.request.toString ? e.request.toString() : String(e.request));
+            // SIP capture handled by _hookSessionCapture via _handleNewSession
             e.request.body = sdp;
             this._log('info', 'Injected SDP into INVITE');
           }
         });
+        this._pendingCallId = callId;
         this.activeCall = { callId, target: targetUri, direction: 'outbound', startTime: null, status: 'calling', localRtpPort: rtpPort, localIp };
         callHistory.addCall({ callId, direction: 'outbound', target: targetUri });
         resolve({ target: targetUri, callId, status: 'calling' });
@@ -825,6 +1042,7 @@ class SipManager extends EventEmitter {
       const sdp     = buildSdp(localIp, rtpPort);
       this._log('info', `Answering ${from} | local RTP ${localIp}:${rtpPort}`);
       if (remoteSdp) captureManager.writeSipMessage(callId, this.config.server, 5060, localIp, 5060, remoteSdp);
+      this._pendingCallId = callId;
       this.activeCall   = { callId, target: from, direction: 'inbound', startTime: null, status: 'connecting', localRtpPort: rtpPort, localIp };
       this.session      = session;
       this.incomingCall = null;
@@ -938,11 +1156,71 @@ class SipManager extends EventEmitter {
   hangup() {
     return new Promise((resolve) => {
       if (this.session) {
-        try { this.session.terminate(); } catch (e) { this._log('warn', `Hangup error: ${e.message}`); }
+        try {
+          this._captureOutboundBye();
+          this.session.terminate();
+        } catch (e) { this._log('warn', `Hangup error: ${e.message}`); }
+      } else {
+        this._teardown();
       }
-      this._teardown();
       resolve();
     });
+  }
+
+  _captureOutboundBye() {
+    const callId  = this.activeCall?.callId;
+    if (!callId) return;
+    const localIp = getLocalIp();
+    const server  = this.config?.server || '';
+    try {
+      const dialog = this.session?._dialog;
+      if (!dialog) return;
+
+      // JsSIP stores URIs as objects with toString() — call it explicitly
+      // Also check multiple property paths across JsSIP versions
+      const uriToStr = (u) => {
+        if (!u) return null;
+        if (typeof u === 'string') return u;
+        if (typeof u.toString === 'function') {
+          const s = u.toString();
+          if (s && s !== '[object Object]' && s.includes('sip:')) return s;
+        }
+        if (u.uri) return uriToStr(u.uri);
+        return null;
+      };
+
+      const localUri  = uriToStr(dialog.local_uri)  || `sip:${this.config.username}@${server}`;
+      const remoteUri = uriToStr(dialog.remote_uri)
+                     || uriToStr(dialog._remote_uri)
+                     || this.activeCall?.target
+                     || `sip:unknown@${server}`;
+
+      // Dialog ID can be in different places depending on JsSIP version
+      const dialogId  = dialog.id || dialog._id || {};
+      const callIdSip = String(dialogId.call_id  || dialog.call_id  || '');
+      const localTag  = String(dialogId.local_tag || dialog.local_tag || '');
+      const remoteTag = String(dialogId.remote_tag|| dialog.remote_tag|| '');
+      const cseq      = (dialog.local_seqnum || dialog._local_seqnum || 1) + 1;
+
+      this._log('info', `[CAP] BYE dialog: remote=${remoteUri} local=${localUri} cseq=${cseq}`);
+      const CRLF      = '\r\n';
+      const byeText   = [
+        `BYE ${remoteUri} SIP/2.0`,
+        `Via: SIP/2.0/WS ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
+        `Max-Forwards: 70`,
+        `From: <${localUri}>;tag=${localTag}`,
+        `To: <${remoteUri}>;tag=${remoteTag}`,
+        `Call-ID: ${callIdSip}`,
+        `CSeq: ${cseq} BYE`,
+        `Content-Length: 0`,
+        ``,
+        ``
+      ].join(CRLF);
+      const written = captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, byeText);
+      this._log('info', `[CAP] Outbound BYE ${written ? 'written to pcap' : 'FAILED'} callId=${callId?.slice(0,8)} byeLen=${byeText.length} firstLine=${byeText.split('\r\n')[0]}`);
+    } catch(e) {
+      this._log('warn', `BYE capture error: ${e.message}`);
+    }
   }
 
   // ── Reject inbound ────────────────────────────────────────────────────────
