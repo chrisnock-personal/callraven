@@ -1,6 +1,6 @@
 # SIP Endpoint — Containerized Web Softphone
 
-A fully containerized SIP softphone with a web UI, complete REST API for headless operation, per-call packet capture, inbound audio recording, and WAV file playback into the RTP stream.
+A fully containerized SIP softphone with a web UI, complete REST API for headless operation, per-call packet capture (INVITE/100/180/200/ACK/BYE + RTP), inbound audio recording, WAV file playback into the RTP stream, live audio relay to the browser, and on-demand call recording.
 
 ---
 
@@ -10,18 +10,21 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 ┌─────────────────────────────────────────────────────────────┐
 │                      Docker / Podman Container              │
 │                                                             │
-│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐   │
-│  │  Express    │   │  SipManager  │   │ CaptureManager  │   │
-│  │  REST API   │◄─►│  (JsSIP/WS)  │   │ (pure Node pcap)│   │
-│  │  :3000      │   │              │   └────────┬────────┘   │
-│  └──────┬──────┘   └──────┬───────┘            │            │
-│         │                 │            ┌───────▼────-────┐  │
+│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐  │
+│  │  Express    │   │  SipManager  │   │ CaptureManager  │  │
+│  │  REST API   │◄─►│  (JsSIP/WS)  │   │ (pure Node pcap)│  │
+│  │  :3000      │   │              │   └────────┬────────┘  │
+│  └──────┬──────┘   └──────┬───────┘            │           │
+│         │                 │            ┌────────▼────────┐  │
 │  ┌──────▼─────────────────▼──────────┐ │  AudioDecoder   │  │
 │  │       WebSocket Server            │ │ G.722/PCMU/PCMA │  │
-│  └──────────────┬────────────────────┘ │  → WAV file     │  │
-│                 │                      └─────────────────┘  │
+│  │  Control: ws://host:3000          │ │  → WAV file     │  │
+│  │  Audio:   ws://host:3000/audio    │ └─────────────────┘  │
+│  └──────────────┬────────────────────┘                      │
+│                 │                                           │
 │  ┌──────────────▼────────────────────┐                      │
 │  │    Frontend (Single-file HTML)    │                      │
+│  │  Dark/light mode · Responsive     │                      │
 │  └───────────────────────────────────┘                      │
 └─────────────────────────────────────────────────────────────┘
          │ SIP over WebSocket          │ UDP RTP
@@ -35,12 +38,13 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 
 | File | Purpose |
 |---|---|
-| `backend/server.js` | Express HTTP/WS server, REST API endpoints |
-| `backend/sipManager.js` | JsSIP UA, call handling, RTP bridge, WAV playback |
+| `backend/server.js` | Express HTTP/WS server, REST API endpoints, audio relay |
+| `backend/sipManager.js` | JsSIP UA, call handling, RTP bridge, WAV playback, keepalive |
 | `backend/captureManager.js` | Per-call `.pcap` writer (pure Node.js, no tcpdump) |
 | `backend/audioDecoder.js` | G.722/PCMU/PCMA decoder, inbound call WAV recorder |
 | `backend/callHistory.js` | Persistent call history (JSON + CSV export) |
-| `frontend/index.html` | Single-file softphone UI |
+| `frontend/index.html` | Single-file softphone UI (Clarity theme) |
+| `openapi.json` | OpenAPI 3.1 spec — import into Postman, Swagger, Redocly |
 
 ---
 
@@ -50,7 +54,6 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 <img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/11bb850e-ec9c-40f4-a68c-8452edc965ad" /> <br>
 <img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/27afe985-fa58-4e1c-8a7a-00aec9c7f165" /> <br>
 <img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/9aff4d44-c056-4236-a9b6-8e117f2b6344" /> <br>
-
 
 ---
 
@@ -120,13 +123,13 @@ volumes:
 
 ## REST API Reference
 
-All endpoints accept and return JSON unless stated otherwise.
+All endpoints accept and return JSON unless stated otherwise. A full **OpenAPI 3.1 spec** is included at `openapi.json` — importable into Postman, Swagger Editor, and Redocly.
 
 ### Registration
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
-| `GET` | `/api/status` | — | Full state: registration, active call, hold, conference |
+| `GET` | `/api/status` | — | Full state: registration, active call, hold, conference, RTP stats |
 | `POST` | `/api/register` | `{server, username, password, port?, wsPort?, wsPath?, displayName?, transport?}` | Register with SIP server |
 | `POST` | `/api/unregister` | — | Unregister |
 
@@ -146,11 +149,11 @@ POST /api/register
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
-| `POST` | `/api/call` | `{target}` | Initiate outbound call. Starts capture automatically. |
+| `POST` | `/api/call` | `{target}` | Initiate outbound call. Starts pcap capture automatically. |
 | `POST` | `/api/answer` | — | Answer incoming call. Starts capture automatically. |
-| `POST` | `/api/hangup` | — | End active call. Finalises capture and audio recording. |
+| `POST` | `/api/hangup` | — | End active call. Sends BYE or CANCEL (pre-answer). Finalises capture. |
 | `POST` | `/api/reject` | — | Reject incoming call (SIP 603 Decline) |
-| `POST` | `/api/dtmf` | `{digit}` | Send DTMF tone (0-9, *, #) |
+| `POST` | `/api/dtmf` | `{digit}` | Send DTMF tone (0–9, *, #) via RFC 2833 |
 
 **Call target formats:**
 ```
@@ -159,12 +162,16 @@ POST /api/register
 "sip:alice@pbx.local"     → verbatim
 ```
 
+**CANCEL behaviour:** If `/api/hangup` is called before the call is answered (status `calling` or `ringing`), a SIP CANCEL is sent and the history entry is marked `cancelled`.
+
 ### Hold & Resume
 
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/hold` | Put active call on hold. Mutes RTP and sends re-INVITE with `a=sendonly`. |
 | `POST` | `/api/resume` | Resume held call. Restores RTP and sends re-INVITE with `a=sendrecv`. |
+
+**Remote hold:** If the far end sends a re-INVITE with `a=sendonly` or `a=inactive`, a `remoteHold` WebSocket event is emitted and the UI shows a "Remote Hold" indicator. When they resume with `a=sendrecv`, `remoteHoldReleased` is emitted.
 
 ### Transfer
 
@@ -182,7 +189,7 @@ POST /api/register
 
 ### WAV Playback
 
-WAV files are converted to raw G.722 at upload time using ffmpeg. During playback, G.722 frames are injected directly into the RTP stream, replacing the live audio for the duration.
+WAV files are converted to raw G.722 at upload time using ffmpeg. During playback, G.722 frames are injected directly into the RTP stream, synchronised to the existing stream's SSRC and sequence number to avoid jitter buffer issues at the far end. Incoming RTP is suppressed during playback.
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
@@ -192,14 +199,48 @@ WAV files are converted to raw G.722 at upload time using ffmpeg. During playbac
 | `POST` | `/api/play` | `{filename}` | Play a file into the active call |
 | `POST` | `/api/play/stop` | — | Stop playback |
 
-**WAV format note:** Any WAV format is accepted. ffmpeg converts to 16kHz mono G.722 automatically. For best quality, source files should be 16kHz mono. Convert with:
+**WAV format note:** Any WAV format is accepted. ffmpeg converts to 16kHz mono G.722 automatically. For best quality, source files should be 16kHz mono:
 ```bash
 ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav
 ```
 
+### On-Demand Call Recording
+
+Separate from the always-on pcap capture. Starts an audio recording at any point during a call, saves a WAV file to `/captures`, and links it in the Captures tab.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/record/start` | Begin recording inbound audio for the active call |
+| `POST` | `/api/record/stop` | Stop recording and save WAV file |
+
+### Live RTP Stats
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/stats` | Live RTP stats for the active call |
+
+**Response:**
+```json
+{
+  "codec": "G722/16kHz",
+  "rxPackets": 1400,
+  "txPackets": 1400,
+  "lostPackets": 0,
+  "lossPercent": "0.0",
+  "jitterMs": 3,
+  "rxKbps": 69,
+  "txKbps": 68,
+  "elapsed": 28
+}
+```
+
+Stats are polled by the UI every 2 seconds and displayed live in the call panel.
+
 ### Packet Captures
 
-Per-call `.pcap` files are written in pure Node.js (no tcpdump required). Each capture contains SIP signalling and RTP packets, and is openable in Wireshark. Use **Telephony → VoIP Calls** in Wireshark to reconstruct the call.
+Per-call `.pcap` files contain the full SIP dialog (INVITE → 100 Trying → 180 Ringing → 200 OK → ACK → BYE) plus all RTP packets. Written in pure Node.js — no tcpdump required.
+
+Open in Wireshark and use **Telephony → VoIP Calls** to reconstruct the call flow. Apply the `sip` display filter to see only SIP messages.
 
 An audio `.wav` file is also recorded per call containing the decoded inbound RTP audio (G.722 → 16kHz PCM, or PCMU/PCMA → 8kHz PCM).
 
@@ -211,6 +252,16 @@ An audio `.wav` file is also recorded per call containing the decoded inbound RT
 | `GET` | `/captures/audio_*.wav` | Download a decoded audio recording |
 
 ### Call History
+
+History entries have a `status` field:
+
+| Status | Meaning |
+|---|---|
+| `active` | Call in progress |
+| `completed` | Call ended normally (BYE) |
+| `missed` | Inbound call rang but was not answered |
+| `cancelled` | Outbound call was hung up before answer (CANCEL) |
+| `failed` | Call failed (4xx/5xx or WebSocket disconnect) |
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -230,7 +281,11 @@ History is persisted to `/captures/call_history.json` and survives container res
 
 ## WebSocket Events
 
-Connect to `ws://localhost:3000`. On connect, the current state is sent immediately.
+**Control connection:** `ws://localhost:3000` — receives JSON events, current state sent on connect.
+
+**Audio relay:** `ws://localhost:3000/audio` — receives binary frames containing decoded PCM audio from the inbound RTP stream. Frame format: `[pt:1 byte][sampleRate:4 bytes LE][pcm16 samples...]`. Used by the browser's Web Audio API for live call audio.
+
+### Event Reference
 
 | Event | Data | Description |
 |---|---|---|
@@ -238,23 +293,75 @@ Connect to `ws://localhost:3000`. On connect, the current state is sent immediat
 | `registered` | `{username, server, displayName}` | Registration succeeded |
 | `unregistered` | `{}` | Unregistered |
 | `registrationFailed` | `{cause}` | Registration failed |
-| `incomingCall` | `{from, displayName}` | Incoming call ringing |
+| `incomingCall` | `{callId, from, displayName}` | Incoming call ringing |
 | `callConnected` | `{callId, direction}` | Call answered/established |
 | `callEnded` | `{callId, cause}` | Call ended |
 | `callFailed` | `{callId, cause}` | Call failed |
+| `callMissed` | `{callId, from}` | Inbound call missed (far end cancelled) |
 | `callHeld` | `{callId}` | Call put on hold |
 | `callResumed` | `{callId}` | Call resumed from hold |
+| `remoteHold` | `{callId}` | Far end put call on hold (a=sendonly) |
+| `remoteHoldReleased` | `{callId}` | Far end resumed call (a=sendrecv) |
 | `conferenceStarted` | `{target}` | Conference leg connected |
 | `conferenceEnded` | `{}` | Conference leg dropped |
 | `playbackEnded` | `{file?, error?, stopped?}` | WAV playback finished |
-| `captureReady` | `{callId, filename, url, size}` | Capture file ready for download |
+| `captureReady` | `{callId, filename, url, size}` | Capture file ready |
+| `recordingStarted` | `{callId}` | On-demand recording started |
+| `recordingStopped` | `{callId, audioFile}` | On-demand recording saved |
+| `keepalive` | `{ok, cause?}` | OPTIONS keepalive result |
+| `ipChanged` | `{oldIp, newIp}` | Container IP changed — re-registering |
+| `wsDisconnected` | `{cause}` | WebSocket to PBX dropped |
+| `wsConnected` | `{}` | WebSocket to PBX reconnected |
 | `log` | `{level, message, timestamp}` | System log entry |
+
+---
+
+## Reliability Features
+
+### OPTIONS Keepalive
+
+After registration, a SIP OPTIONS is sent to the PBX every 30 seconds. If it fails, a warning is logged, a `keepalive` event is emitted, and re-registration is triggered automatically.
+
+### IP Change Detection
+
+The container's local IP is polled every 15 seconds. If it changes (common after cloud VM restarts or container reassignment), the endpoint re-registers automatically so the SIP Contact header stays correct.
+
+### Graceful WebSocket Reconnection
+
+If the WebSocket connection to the PBX drops mid-call:
+- The active call is torn down and marked `failed` in history
+- Any unanswered inbound call is marked `missed`
+- `wsDisconnected` event is broadcast to the UI
+- JsSIP's built-in recovery attempts to reconnect
+- On reconnect, `wsConnected` is broadcast and the SIP capture hooks are re-attached
+
+---
+
+## UI Features
+
+### Clarity Theme
+Single-file softphone with DM Sans + DM Mono typography, white card surfaces, and a blue/green/amber status system.
+
+### Dark / Light Mode
+Toggle between dark and light themes via the 🌙/☀️ button in the header. Preference is persisted to `localStorage`.
+
+### Live Audio
+Click **🔊 Listen** during a call to hear the inbound audio stream in the browser. Uses the Web Audio API — no plugins required. Works for G.722 (16kHz), PCMU and PCMA (8kHz) codecs.
+
+### RTP Stats Panel
+Appears automatically when a call connects. Displays codec, RX/TX packet counts, packet loss %, jitter (ms), and RX/TX kbps. Updated every 2 seconds via `GET /api/stats`.
+
+### Registration Form Lock
+When registered, the SIP registration form locks and displays the active credentials. Fields populate automatically from server state on page reload — even if registration was done via the API.
+
+### Mobile Responsive
+The layout adapts at 1100px (right panel drops below) and 768px (single column). Functional on tablets and large phone screens.
 
 ---
 
 ## Headless / Automation Usage
 
-The REST API is fully usable without the browser UI. Example call flow:
+The REST API is fully usable without the browser UI:
 
 ```bash
 BASE=http://localhost:3000
@@ -262,37 +369,44 @@ BASE=http://localhost:3000
 # 1. Register
 curl -s -X POST $BASE/api/register \
   -H "Content-Type: application/json" \
-  -d '{"server":"pbx.local","username":"1001","password":"secret"}'
+  -d '{"server":"pbx.local","username":"1001","password":"secret","wsPort":8088}'
 
 # 2. Make a call
 curl -s -X POST $BASE/api/call \
   -H "Content-Type: application/json" \
   -d '{"target":"1002"}'
 
-# 3. Check status
-curl -s $BASE/api/status
+# 3. Check status (includes RTP stats when call is active)
+curl -s $BASE/api/status | python3 -m json.tool
 
-# 4. Play a WAV file
+# 4. Poll live RTP stats
+curl -s $BASE/api/stats
+
+# 5. Play a WAV file into the call
 curl -s -X POST $BASE/api/play \
   -H "Content-Type: application/json" \
-  -d '{"filename":"announcement_8k.g722"}'
+  -d '{"filename":"announcement.g722"}'
 
-# 5. Put on hold
+# 6. Start on-demand recording
+curl -s -X POST $BASE/api/record/start
+
+# 7. Stop recording
+curl -s -X POST $BASE/api/record/stop
+
+# 8. Put on hold / resume
 curl -s -X POST $BASE/api/hold
-
-# 6. Resume
 curl -s -X POST $BASE/api/resume
 
-# 7. Hang up
+# 9. Hang up
 curl -s -X POST $BASE/api/hangup
 
-# 8. Download the capture
+# 10. Download the pcap
 curl -O $BASE/captures/<filename>.pcap
 
-# 9. Download the audio recording
+# 11. Download decoded audio recording
 curl -O $BASE/captures/audio_<callid>.wav
 
-# 10. Export call history
+# 12. Export call history as CSV
 curl -O $BASE/api/history/export
 ```
 
@@ -307,14 +421,17 @@ curl -O $BASE/api/history/export
 | PCMA (G.711 A-law) | 8 | Send + Receive | 8kHz narrowband. Fallback. |
 | telephone-event | 101 | Send | DTMF via RFC 2833 |
 
-SDP advertises G.722 as the preferred codec. If the PBX does not support G.722, it will fall back to PCMU or PCMA.
+SDP advertises G.722 as the preferred codec. If the PBX does not support G.722, it falls back to PCMU or PCMA automatically.
 
 ---
 
 ## Notes
 
 - **No tcpdump required** — packet captures are written in pure Node.js using the libpcap binary format
-- **No WebRTC** — media is handled entirely in Node.js using `dgram` UDP sockets, making the endpoint fully headless-capable
-- **Inbound audio** — decoded in real time and saved as a WAV file per call in the `/captures` volume
+- **No audio hardware required** — media is handled entirely in Node.js using `dgram` UDP sockets; fully headless-capable
+- **Full SIP dialog captured** — INVITE, 100 Trying, 180 Ringing, 200 OK, ACK, and BYE all appear in Wireshark
+- **Inbound audio** — decoded in real time (G.722 ADPCM, μ-law, A-law) and saved as a WAV file per call
 - **Hold** — implemented via RTP mute + raw SIP re-INVITE (bypasses JsSIP's WebRTC renegotiation)
-- **WAV playback** — injects G.722 frames directly into the RTP stream, synchronised to the existing stream's SSRC and sequence number to avoid jitter buffer issues at the far end
+- **WAV playback** — injects G.722 frames directly into the RTP stream, synchronised to the existing stream's SSRC and sequence number
+- **On-demand recording** — separate from the always-on pcap; start/stop at any point during a call
+- **Live audio relay** — inbound RTP is decoded and streamed to the browser via a dedicated WebSocket endpoint for real-time listening
