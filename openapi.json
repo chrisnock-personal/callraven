@@ -1,0 +1,1734 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SIP Endpoint API",
+    "description": "REST API for a containerized SIP softphone endpoint. Supports SIP registration, inbound/outbound calls, hold/resume, blind and attended transfer, 3-way conference, WAV file playback into the RTP stream, on-demand call recording, live RTP statistics, per-call packet capture (full SIP dialog + RTP), call history, and system logging.\n\nAll endpoints accept and return `application/json` unless stated otherwise. Real-time events are delivered via WebSocket at `ws://<host>:<port>` (control) and decoded PCM audio at `ws://<host>:<port>/audio` (live audio relay).",
+    "version": "1.1.0",
+    "contact": {
+      "name": "SIP Endpoint"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local container (default)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Status",
+      "description": "Registration and call state"
+    },
+    {
+      "name": "Registration",
+      "description": "SIP UA registration"
+    },
+    {
+      "name": "Calls",
+      "description": "Outbound and inbound call control"
+    },
+    {
+      "name": "Hold",
+      "description": "Call hold and resume"
+    },
+    {
+      "name": "Transfer",
+      "description": "Blind and attended call transfer"
+    },
+    {
+      "name": "Conference",
+      "description": "3-way conference bridging"
+    },
+    {
+      "name": "WAV Playback",
+      "description": "Upload and play WAV audio into the RTP stream"
+    },
+    {
+      "name": "Captures",
+      "description": "Per-call pcap and audio recording download"
+    },
+    {
+      "name": "History",
+      "description": "Persistent call history"
+    },
+    {
+      "name": "Logs",
+      "description": "System log export"
+    },
+    {
+      "name": "Recording",
+      "description": "On-demand call recording (separate from always-on pcap capture)"
+    },
+    {
+      "name": "Statistics",
+      "description": "Live RTP stats for the active call"
+    }
+  ],
+  "paths": {
+    "/api/status": {
+      "get": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Get current state",
+        "description": "Returns the full current state of the endpoint including registration status, active call, incoming call, and recent log entries.",
+        "operationId": "getStatus",
+        "responses": {
+          "200": {
+            "description": "Current state snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/register": {
+      "post": {
+        "tags": [
+          "Registration"
+        ],
+        "summary": "Register with SIP server",
+        "description": "Initiates SIP registration over WebSocket transport. On success a `registered` WebSocket event is broadcast. Registration is re-attempted automatically before expiry.",
+        "operationId": "register",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              },
+              "example": {
+                "server": "pbx.local",
+                "port": 5060,
+                "wsPort": 8088,
+                "username": "1001",
+                "password": "secret",
+                "displayName": "Alice",
+                "transport": "UDP"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registration initiated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/unregister": {
+      "post": {
+        "tags": [
+          "Registration"
+        ],
+        "summary": "Unregister from SIP server",
+        "description": "Sends a SIP REGISTER with Expires: 0 and stops the UA. A `unregistered` WebSocket event is broadcast.",
+        "operationId": "unregister",
+        "responses": {
+          "200": {
+            "description": "Unregistered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/call": {
+      "post": {
+        "tags": [
+          "Calls"
+        ],
+        "summary": "Initiate outbound call",
+        "description": "Dials the target extension or SIP URI. A per-call packet capture (.pcap) and audio recording (.wav) are started automatically. Returns a `callId` which can be used to correlate captures and history entries.\n\n**Target formats accepted:**\n- `1002` \u2192 resolved to `sip:1002@<registered server>`\n- `1002@pbx.local` \u2192 `sip:1002@pbx.local`\n- `sip:alice@pbx.local` \u2192 used verbatim",
+        "operationId": "makeCall",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallRequest"
+              },
+              "example": {
+                "target": "1002"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Call initiated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "callId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "target": {
+                          "type": "string",
+                          "example": "sip:1002@pbx.local"
+                        },
+                        "status": {
+                          "type": "string",
+                          "example": "calling"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/answer": {
+      "post": {
+        "tags": [
+          "Calls"
+        ],
+        "summary": "Answer incoming call",
+        "description": "Answers the current incoming call. A packet capture and audio recording are started. A `callConnected` WebSocket event is broadcast when the call is established.",
+        "operationId": "answerCall",
+        "responses": {
+          "200": {
+            "description": "Call answered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "callId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "from": {
+                          "type": "string",
+                          "example": "sip:1113@pbx.local"
+                        },
+                        "displayName": {
+                          "type": "string",
+                          "example": "Bob"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/hangup": {
+      "post": {
+        "tags": [
+          "Calls"
+        ],
+        "summary": "End active call",
+        "description": "Sends a SIP BYE and ends the active call. The packet capture and audio recording are finalised. A `callEnded` WebSocket event is broadcast.",
+        "operationId": "hangup",
+        "responses": {
+          "200": {
+            "description": "Call ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "captureFile": {
+                          "type": "string",
+                          "nullable": true,
+                          "example": "/captures/call_2026-04-28T08-46-53_6a8bd8e8.pcap"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/reject": {
+      "post": {
+        "tags": [
+          "Calls"
+        ],
+        "summary": "Reject incoming call",
+        "description": "Rejects the current incoming call with SIP 603 Decline.",
+        "operationId": "rejectCall",
+        "responses": {
+          "200": {
+            "description": "Call rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/dtmf": {
+      "post": {
+        "tags": [
+          "Calls"
+        ],
+        "summary": "Send DTMF tone",
+        "description": "Sends a DTMF digit via RFC 2833 telephone-event RTP during an active call.",
+        "operationId": "sendDTMF",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DTMFRequest"
+              },
+              "example": {
+                "digit": "5"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "DTMF sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/hold": {
+      "post": {
+        "tags": [
+          "Hold"
+        ],
+        "summary": "Put active call on hold",
+        "description": "Mutes the RTP bridge and sends a SIP re-INVITE with `a=sendonly` to signal hold to the remote party. A `callHeld` WebSocket event is broadcast.",
+        "operationId": "holdCall",
+        "responses": {
+          "200": {
+            "description": "Call on hold",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "onHold": {
+                          "type": "boolean",
+                          "example": true
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/resume": {
+      "post": {
+        "tags": [
+          "Hold"
+        ],
+        "summary": "Resume held call",
+        "description": "Restores RTP forwarding and sends a SIP re-INVITE with `a=sendrecv` to resume the call. A `callResumed` WebSocket event is broadcast.",
+        "operationId": "resumeCall",
+        "responses": {
+          "200": {
+            "description": "Call resumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "onHold": {
+                          "type": "boolean",
+                          "example": false
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/transfer/blind": {
+      "post": {
+        "tags": [
+          "Transfer"
+        ],
+        "summary": "Blind transfer",
+        "description": "Sends a SIP REFER to the active call directing the remote party to call the target. The call leg from this endpoint ends immediately once the REFER is accepted.",
+        "operationId": "blindTransfer",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetRequest"
+              },
+              "example": {
+                "target": "1003"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "REFER sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "target": {
+                          "type": "string",
+                          "example": "sip:1003@pbx.local"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/transfer/attended": {
+      "post": {
+        "tags": [
+          "Transfer"
+        ],
+        "summary": "Attended transfer",
+        "description": "Dials the transfer target as a second call leg. Once the target answers, sends a SIP REFER with Replaces header on the original leg, connecting the two remote parties directly. Both legs then end from this endpoint's perspective.",
+        "operationId": "attendedTransfer",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetRequest"
+              },
+              "example": {
+                "target": "1003"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Attended transfer in progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "target": {
+                          "type": "string",
+                          "example": "sip:1003@pbx.local"
+                        },
+                        "status": {
+                          "type": "string",
+                          "example": "transferring"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/conference": {
+      "post": {
+        "tags": [
+          "Conference"
+        ],
+        "summary": "Add party to conference",
+        "description": "Dials a third party and bridges their RTP stream alongside the active call, creating a 3-way conference. A `conferenceStarted` WebSocket event is broadcast when the conference leg connects.",
+        "operationId": "startConference",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetRequest"
+              },
+              "example": {
+                "target": "1003"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Conference leg dialling",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "target": {
+                          "type": "string",
+                          "example": "sip:1003@pbx.local"
+                        },
+                        "status": {
+                          "type": "string",
+                          "example": "conferencing"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/conference/end": {
+      "post": {
+        "tags": [
+          "Conference"
+        ],
+        "summary": "Drop conference leg",
+        "description": "Terminates the conference leg only. The original two-party call remains active. A `conferenceEnded` WebSocket event is broadcast.",
+        "operationId": "endConference",
+        "responses": {
+          "200": {
+            "description": "Conference leg dropped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/wavfiles": {
+      "get": {
+        "tags": [
+          "WAV Playback"
+        ],
+        "summary": "List WAV files",
+        "description": "Returns all uploaded and converted WAV/G.722 files available for playback.",
+        "operationId": "listWavFiles",
+        "responses": {
+          "200": {
+            "description": "File list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "files": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WavFile"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/wavfiles/upload": {
+      "post": {
+        "tags": [
+          "WAV Playback"
+        ],
+        "summary": "Upload and convert WAV file",
+        "description": "Accepts any WAV file (any sample rate, channels, bit depth). ffmpeg converts it to raw G.722 16kHz mono at upload time. The converted file is stored as `<name>.g722` and returned for use with `/api/play`.",
+        "operationId": "uploadWavFile",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "WAV audio file to upload"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File uploaded and converted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "filename": {
+                          "type": "string",
+                          "example": "announcement_8k.g722"
+                        },
+                        "url": {
+                          "type": "string",
+                          "example": "/wavfiles/announcement_8k.g722"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/wavfiles/{filename}": {
+      "delete": {
+        "tags": [
+          "WAV Playback"
+        ],
+        "summary": "Delete WAV file",
+        "description": "Deletes a WAV/G.722 file from the server.",
+        "operationId": "deleteWavFile",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "announcement_8k.g722"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/play": {
+      "post": {
+        "tags": [
+          "WAV Playback"
+        ],
+        "summary": "Play WAV file into active call",
+        "description": "Injects a pre-converted G.722 file into the active RTP stream. Playback takes over the stream's SSRC and sequence number for seamless injection. Incoming RTP is suppressed during playback. A `playbackEnded` WebSocket event is broadcast when complete.",
+        "operationId": "playWav",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "filename"
+                ],
+                "properties": {
+                  "filename": {
+                    "type": "string",
+                    "description": "Filename as returned by /api/wavfiles",
+                    "example": "announcement_8k.g722"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Playback started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "file": {
+                          "type": "string",
+                          "example": "announcement_8k.g722"
+                        },
+                        "status": {
+                          "type": "string",
+                          "example": "playing"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/play/stop": {
+      "post": {
+        "tags": [
+          "WAV Playback"
+        ],
+        "summary": "Stop WAV playback",
+        "description": "Stops any active WAV playback and resumes normal RTP forwarding. A `playbackEnded` WebSocket event is broadcast.",
+        "operationId": "stopWav",
+        "responses": {
+          "200": {
+            "description": "Playback stopped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/captures": {
+      "get": {
+        "tags": [
+          "Captures"
+        ],
+        "summary": "List packet captures",
+        "description": "Returns all saved .pcap files. Each entry optionally includes a link to a decoded audio .wav recording of the inbound RTP stream for that call.",
+        "operationId": "listCaptures",
+        "responses": {
+          "200": {
+            "description": "Capture file list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "captures": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CaptureFile"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/captures/{filename}": {
+      "delete": {
+        "tags": [
+          "Captures"
+        ],
+        "summary": "Delete capture file",
+        "description": "Deletes a .pcap or audio .wav file from the captures directory.",
+        "operationId": "deleteCapture",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "call_2026-04-28T08-46-53_6a8bd8e8.pcap"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/history": {
+      "get": {
+        "tags": [
+          "History"
+        ],
+        "summary": "Get call history",
+        "description": "Returns the full call history as JSON, most recent first. History is persisted to `/captures/call_history.json` and survives container restarts.",
+        "operationId": "getHistory",
+        "responses": {
+          "200": {
+            "description": "Call history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "history": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CallHistoryEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "History"
+        ],
+        "summary": "Clear call history",
+        "description": "Deletes all call history entries.",
+        "operationId": "clearHistory",
+        "responses": {
+          "200": {
+            "description": "History cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/history/export": {
+      "get": {
+        "tags": [
+          "History"
+        ],
+        "summary": "Export call history as CSV",
+        "description": "Downloads the full call history as a CSV file suitable for import into spreadsheet applications.",
+        "operationId": "exportHistory",
+        "responses": {
+          "200": {
+            "description": "CSV file download",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "attachment; filename=\"call_history_2026-04-28.csv\""
+              }
+            },
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/log/export": {
+      "get": {
+        "tags": [
+          "Logs"
+        ],
+        "summary": "Export system log",
+        "description": "Downloads the current in-memory system log as a plain text file with timestamps.",
+        "operationId": "exportLog",
+        "responses": {
+          "200": {
+            "description": "Log file download",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "attachment; filename=\"sip_log_2026-04-28.txt\""
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Get live RTP stats",
+        "description": "Returns live RTP statistics for the active call. Updated in real time by the RTP bridge. Returns 409 if no call is active.",
+        "operationId": "getRtpStats",
+        "responses": {
+          "200": {
+            "description": "Live RTP stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RtpStats"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/record/start": {
+      "post": {
+        "tags": [
+          "Recording"
+        ],
+        "summary": "Start on-demand recording",
+        "description": "Begins recording the inbound audio of the active call to a WAV file in `/captures`. This is separate from the always-on pcap capture and can be started and stopped at any point during a call. A `recordingStarted` WebSocket event is broadcast.",
+        "operationId": "startRecording",
+        "responses": {
+          "200": {
+            "description": "Recording started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "recording": {
+                          "type": "boolean",
+                          "example": true
+                        },
+                        "file": {
+                          "type": "string",
+                          "example": "rec_6a8bd8e8_1716825600000.wav"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/record/stop": {
+      "post": {
+        "tags": [
+          "Recording"
+        ],
+        "summary": "Stop on-demand recording",
+        "description": "Stops the active recording and saves the WAV file. The file is immediately available in `/captures`. A `recordingStopped` WebSocket event is broadcast with the download path.",
+        "operationId": "stopRecording",
+        "responses": {
+          "200": {
+            "description": "Recording stopped and saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "recording": {
+                          "type": "boolean",
+                          "example": false
+                        },
+                        "audioFile": {
+                          "type": "string",
+                          "nullable": true,
+                          "example": "/captures/rec_6a8bd8e8_1716825600000.wav"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SuccessResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "example": "Not registered"
+          }
+        }
+      },
+      "RegisterRequest": {
+        "type": "object",
+        "required": [
+          "server",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "server": {
+            "type": "string",
+            "description": "SIP server hostname or IP",
+            "example": "pbx.local"
+          },
+          "port": {
+            "type": "integer",
+            "description": "SIP UDP/TCP port",
+            "default": 5060,
+            "example": 5060
+          },
+          "wsPort": {
+            "type": "integer",
+            "description": "WebSocket port for SIP transport",
+            "default": 8088,
+            "example": 8088
+          },
+          "wsPath": {
+            "type": "string",
+            "description": "WebSocket path",
+            "default": "/ws",
+            "example": "/ws"
+          },
+          "username": {
+            "type": "string",
+            "description": "SIP username / extension",
+            "example": "1001"
+          },
+          "password": {
+            "type": "string",
+            "description": "SIP password",
+            "example": "secret"
+          },
+          "displayName": {
+            "type": "string",
+            "description": "SIP display name (caller ID)",
+            "example": "Alice"
+          },
+          "transport": {
+            "type": "string",
+            "description": "Transport protocol",
+            "enum": [
+              "UDP",
+              "TLS"
+            ],
+            "default": "UDP"
+          }
+        }
+      },
+      "CallRequest": {
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Extension number, user@host, or full SIP URI",
+            "example": "1002"
+          }
+        }
+      },
+      "TargetRequest": {
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Extension number, user@host, or full SIP URI",
+            "example": "1003"
+          }
+        }
+      },
+      "DTMFRequest": {
+        "type": "object",
+        "required": [
+          "digit"
+        ],
+        "properties": {
+          "digit": {
+            "type": "string",
+            "description": "DTMF digit to send",
+            "enum": [
+              "0",
+              "1",
+              "2",
+              "3",
+              "4",
+              "5",
+              "6",
+              "7",
+              "8",
+              "9",
+              "*",
+              "#",
+              "A",
+              "B",
+              "C",
+              "D"
+            ],
+            "example": "5"
+          }
+        }
+      },
+      "SIPConfig": {
+        "type": "object",
+        "description": "Registration configuration used by the current UA",
+        "properties": {
+          "server": {
+            "type": "string",
+            "example": "pbx.local"
+          },
+          "username": {
+            "type": "string",
+            "example": "1001"
+          },
+          "displayName": {
+            "type": "string",
+            "example": "Alice"
+          },
+          "transport": {
+            "type": "string",
+            "example": "UDP"
+          },
+          "port": {
+            "type": "integer",
+            "example": 5060
+          },
+          "wsPort": {
+            "type": "integer",
+            "example": 8088
+          },
+          "wsPath": {
+            "type": "string",
+            "example": "/ws"
+          }
+        }
+      },
+      "ActiveCall": {
+        "type": "object",
+        "properties": {
+          "callId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "type": "string",
+            "example": "sip:1113@pbx.local"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
+          "startTime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "calling",
+              "ringing",
+              "connecting",
+              "connected"
+            ]
+          },
+          "remoteHold": {
+            "type": "boolean",
+            "example": false,
+            "description": "True if far end has put the call on hold (a=sendonly re-INVITE)"
+          },
+          "recording": {
+            "type": "boolean",
+            "example": false,
+            "description": "True if on-demand recording is currently active"
+          },
+          "codec": {
+            "type": "string",
+            "nullable": true,
+            "example": "G722/16kHz",
+            "description": "Negotiated RTP codec (populated once RTP is flowing)"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/RtpStats",
+            "nullable": true
+          }
+        }
+      },
+      "IncomingCall": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "example": "sip:1113@pbx.local"
+          },
+          "displayName": {
+            "type": "string",
+            "example": "Bob"
+          },
+          "callId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Pre-assigned call ID for tracking missed calls in history"
+          }
+        }
+      },
+      "LogEntry": {
+        "type": "object",
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warn",
+              "error"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "State": {
+        "type": "object",
+        "properties": {
+          "registered": {
+            "type": "boolean"
+          },
+          "config": {
+            "$ref": "#/components/schemas/SIPConfig",
+            "nullable": true
+          },
+          "activeCall": {
+            "$ref": "#/components/schemas/ActiveCall",
+            "nullable": true
+          },
+          "incomingCall": {
+            "$ref": "#/components/schemas/IncomingCall",
+            "nullable": true
+          },
+          "conference": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "active": {
+                "type": "boolean"
+              }
+            }
+          },
+          "logs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogEntry"
+            }
+          }
+        }
+      },
+      "WavFile": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "example": "announcement_8k.g722"
+          },
+          "url": {
+            "type": "string",
+            "example": "/wavfiles/announcement_8k.g722"
+          },
+          "size": {
+            "type": "integer",
+            "description": "File size in bytes",
+            "example": 80000
+          }
+        }
+      },
+      "CaptureFile": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "example": "call_2026-04-28T08-46-53_6a8bd8e8.pcap"
+          },
+          "url": {
+            "type": "string",
+            "example": "/captures/call_2026-04-28T08-46-53_6a8bd8e8.pcap"
+          },
+          "size": {
+            "type": "integer",
+            "description": "File size in bytes",
+            "example": 600234
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "audioFile": {
+            "type": "string",
+            "nullable": true,
+            "example": "audio_6a8bd8e8.wav"
+          },
+          "audioUrl": {
+            "type": "string",
+            "nullable": true,
+            "example": "/captures/audio_6a8bd8e8.wav"
+          }
+        }
+      },
+      "CallHistoryEntry": {
+        "type": "object",
+        "properties": {
+          "callId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "example": "sip:1113@pbx.local"
+          },
+          "displayName": {
+            "type": "string",
+            "example": "Bob"
+          },
+          "startTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endTime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "duration": {
+            "type": "integer",
+            "description": "Call duration in seconds",
+            "nullable": true,
+            "example": 42
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "completed",
+              "missed",
+              "failed",
+              "cancelled"
+            ],
+            "description": "missed = inbound rang but not answered; cancelled = outbound hung up pre-answer"
+          },
+          "captureFile": {
+            "type": "string",
+            "nullable": true,
+            "example": "/captures/call_2026-04-28T08-46-53_6a8bd8e8.pcap"
+          }
+        }
+      },
+      "RtpStats": {
+        "type": "object",
+        "properties": {
+          "codec": {
+            "type": "string",
+            "example": "G722/16kHz",
+            "description": "Negotiated codec and sample rate"
+          },
+          "rxPackets": {
+            "type": "integer",
+            "example": 1400,
+            "description": "Inbound RTP packets received"
+          },
+          "txPackets": {
+            "type": "integer",
+            "example": 1400,
+            "description": "Outbound RTP packets sent"
+          },
+          "lostPackets": {
+            "type": "integer",
+            "example": 0,
+            "description": "Estimated lost packets (sequence gap)"
+          },
+          "lossPercent": {
+            "type": "string",
+            "example": "0.0",
+            "description": "Packet loss as percentage string"
+          },
+          "jitterMs": {
+            "type": "integer",
+            "example": 3,
+            "description": "Estimated jitter in milliseconds (RFC 3550)"
+          },
+          "rxKbps": {
+            "type": "integer",
+            "example": 69,
+            "description": "Inbound RTP bitrate (kbps)"
+          },
+          "txKbps": {
+            "type": "integer",
+            "example": 68,
+            "description": "Outbound RTP bitrate (kbps)"
+          },
+          "elapsed": {
+            "type": "integer",
+            "example": 28,
+            "description": "Call duration in seconds"
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Missing or invalid request parameters",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Operation not allowed in current state (e.g. already on a call)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Error": {
+        "description": "Internal server error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "WebSocketEvents": {
+      "description": "Connect to ws://<host>:<port> to receive real-time events. On connect the current state is sent immediately as a `state` event.",
+      "get": {
+        "summary": "WebSocket event stream",
+        "responses": {
+          "200": {
+            "description": "WebSocket event payloads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "data"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "state",
+                        "registered",
+                        "unregistered",
+                        "registrationFailed",
+                        "incomingCall",
+                        "callConnected",
+                        "callEnded",
+                        "callFailed",
+                        "callMissed",
+                        "callHeld",
+                        "callResumed",
+                        "remoteHold",
+                        "remoteHoldReleased",
+                        "conferenceStarted",
+                        "conferenceEnded",
+                        "playbackEnded",
+                        "captureReady",
+                        "recordingStarted",
+                        "recordingStopped",
+                        "keepalive",
+                        "ipChanged",
+                        "wsDisconnected",
+                        "wsConnected",
+                        "log"
+                      ]
+                    },
+                    "data": {
+                      "type": "object",
+                      "description": "Event-specific payload"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

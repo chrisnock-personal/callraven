@@ -73,8 +73,17 @@ sipManager.on('callEnded', (data) => {
   }
 });
 
-sipManager.on('callHeld',    (d) => broadcast('callHeld', d));
-sipManager.on('callResumed', (d) => broadcast('callResumed', d));
+sipManager.on('callHeld',          (d) => broadcast('callHeld', d));
+sipManager.on('callResumed',       (d) => broadcast('callResumed', d));
+sipManager.on('keepalive',         (d) => broadcast('keepalive', d));
+sipManager.on('ipChanged',         (d) => broadcast('ipChanged', d));
+sipManager.on('recordingStarted',  (d) => broadcast('recordingStarted', d));
+sipManager.on('recordingStopped',  (d) => broadcast('recordingStopped', d));
+sipManager.on('callMissed',        (d) => broadcast('callMissed', d));
+sipManager.on('remoteHold',        (d) => broadcast('remoteHold', d));
+sipManager.on('remoteHoldReleased',(d) => broadcast('remoteHoldReleased', d));
+sipManager.on('wsDisconnected',    (d) => broadcast('wsDisconnected', d));
+sipManager.on('wsConnected',       (d) => broadcast('wsConnected', d));
 
 captureManager.on('captureReady', (data) => {
   broadcast('captureReady', data);

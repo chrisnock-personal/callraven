@@ -38,6 +38,36 @@
       --shadow-lg:   0 12px 32px rgba(0,0,0,0.1), 0 4px 8px rgba(0,0,0,0.06);
     }
 
+    [data-theme="dark"] {
+      --bg:          #0f1117;
+      --bg2:         #161b22;
+      --surface:     #1c2230;
+      --surface2:    #161b22;
+      --border:      #2d3748;
+      --border2:     #3d4f6b;
+      --blue:        #3b82f6;
+      --blue-light:  #1e3a5f;
+      --blue-mid:    #2d5a9e;
+      --blue-dark:   #2563eb;
+      --green:       #10b981;
+      --green-light: #064e3b;
+      --green-border:#065f46;
+      --red:         #ef4444;
+      --red-light:   #450a0a;
+      --amber:       #f59e0b;
+      --amber-light: #451a03;
+      --violet:      #8b5cf6;
+      --violet-light:#2e1065;
+      --info:        #06b6d4;
+      --info-light:  #164e63;
+      --text:        #f1f5f9;
+      --text-mid:    #94a3b8;
+      --text-dim:    #475569;
+      --shadow-sm:   0 1px 3px rgba(0,0,0,0.4);
+      --shadow:      0 4px 12px rgba(0,0,0,0.35);
+      --shadow-lg:   0 12px 32px rgba(0,0,0,0.5);
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
@@ -396,7 +426,9 @@
     .call-state-badge.connected { background: var(--green-light); color: var(--green); }
     .call-state-badge.ringing   { background: var(--amber-light); color: var(--amber); animation: badge-pulse 0.8s infinite; }
     .call-state-badge.conf      { background: var(--violet-light); color: var(--violet); }
-    .call-state-badge.incoming  { background: var(--amber-light); color: var(--amber); animation: badge-pulse 0.6s infinite; }
+    .call-state-badge.incoming    { background: var(--amber-light); color: var(--amber); animation: badge-pulse 0.6s infinite; }
+    .call-state-badge.remote-hold { background: var(--amber-light); color: var(--amber); }
+    .call-state-badge.cancelled   { background: var(--red-light);   color: var(--red); }
 
     /* Incoming overlay */
     .incoming-overlay {
@@ -875,6 +907,35 @@
     .keepalive-status { font-size: 10px; color: var(--text-dim); font-family: var(--mono); }
     .keepalive-status.ok   { color: var(--green); }
     .keepalive-status.fail { color: var(--red); }
+
+    /* ── Responsive ──────────────────────────────────────────────────────── */
+    @media (max-width: 1100px) {
+      main {
+        grid-template-columns: 260px 1fr;
+        grid-template-rows: 1fr auto auto;
+        height: auto;
+        overflow-y: auto;
+      }
+      .panel:nth-child(3) { grid-column: 1 / -1; border-right: none; border-top: 1px solid var(--border); max-height: 400px; }
+      .log-panel { grid-column: 1 / -1; }
+    }
+
+    @media (max-width: 768px) {
+      main { grid-template-columns: 1fr; height: auto; overflow-y: auto; }
+      header { padding: 0 12px; gap: 8px; }
+      .logo-version { display: none; }
+      .status-badge { padding: 4px 8px; font-size: 11px; }
+      .panel { border-right: none; border-bottom: 1px solid var(--border); }
+      .log-panel { grid-column: 1; height: 200px; }
+      .dtmf-key { height: 40px; font-size: 15px; }
+      .stats-grid { grid-template-columns: repeat(3,1fr) !important; }
+    }
+
+    @media (max-width: 480px) {
+      header > div:nth-child(3) { display: none; }
+      .panel-body { padding: 12px; }
+    }
+
   </style>
 </head>
 <body>
@@ -889,6 +950,11 @@
   <div class="header-sep"></div>
   <div style="font-size:12px;color:var(--text-mid);">Containerized Softphone</div>
 
+  <button id="theme-toggle" onclick="toggleTheme()"
+    style="background:none;border:1px solid var(--border2);color:var(--text-mid);
+           padding:5px 10px;border-radius:8px;cursor:pointer;font-size:13px;
+           transition:all 0.15s;margin-left:auto;"
+    title="Toggle dark/light mode">🌙</button>
   <div class="status-group">
     <div class="status-badge reg-idle" id="reg-badge">
       <div class="badge-dot" id="reg-dot"></div>
@@ -1202,6 +1268,15 @@ function handleWSMessage({ type, data }) {
     case 'callHeld':         onCallHeld(data); break;
     case 'callResumed':      onCallResumed(data); break;
     case 'log':              addLog(data.level, data.message); break;
+    case 'callMissed':       onCallMissed(data); break;
+    case 'remoteHold':       onRemoteHold(data); break;
+    case 'remoteHoldReleased': onRemoteHoldReleased(data); break;
+    case 'wsDisconnected':   onWsDisconnected(data); break;
+    case 'wsConnected':      onWsConnected(data); break;
+    case 'keepalive':        /* silently ignore */ break;
+    case 'ipChanged':        addLog('warn',`IP changed: ${data.newIp}`); break;
+    case 'recordingStarted': onRecordingStarted(data); break;
+    case 'recordingStopped': onRecordingStopped(data); break;
   }
 }
 
@@ -1940,7 +2015,75 @@ function onRecordingStopped(data) {
   setTimeout(loadCaptures, 1000);
 }
 
+// ─── Dark mode ────────────────────────────────────────────────────────────────
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+  localStorage.setItem('sip-theme', theme);
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'light';
+  applyTheme(cur === 'dark' ? 'light' : 'dark');
+}
+
+// ─── Remote hold ───────────────────────────────────────────────────────────────
+function onRemoteHold(data) {
+  setBadge('remote-hold', '⏸ Remote Hold');
+  addLog('warn', 'Far end put call on hold');
+}
+
+function onRemoteHoldReleased(data) {
+  setBadge('connected', 'Connected');
+  addLog('info', 'Far end resumed call');
+}
+
+// ─── WS connect/disconnect ─────────────────────────────────────────────────────
+function onWsDisconnected(data) {
+  setHeaderBadge('ws-badge', 'ws-off');
+  addLog('warn', `WebSocket to PBX disconnected${data?.cause ? ': '+data.cause : ''}`);
+}
+
+function onWsConnected(data) {
+  setHeaderBadge('ws-badge', 'ws-on');
+  addLog('info', 'WebSocket to PBX reconnected');
+}
+
+// ─── Missed call ───────────────────────────────────────────────────────────────
+function onCallMissed(data) {
+  hideIncoming();
+  stopRingtone();
+  resetCallUI();
+  setHeaderBadge('call-badge-header', 'call-idle');
+  setLabel('call-label', 'Idle');
+  addLog('warn', `Missed call from ${data.from || ''}`);
+  // Flash History tab
+  const histTab = document.querySelector('.tab[onclick*="tab-history"]');
+  if (histTab) {
+    histTab.style.color = 'var(--red)';
+    setTimeout(() => { histTab.style.color = ''; }, 4000);
+  }
+  setTimeout(loadHistory, 600);
+}
+
+// ─── Recording (from WS events) ────────────────────────────────────────────────
+function onRecordingStarted(data) {
+  document.getElementById('btn-record-start').style.display = 'none';
+  document.getElementById('btn-record-stop').style.display  = '';
+  document.getElementById('rec-indicator').classList.add('active');
+}
+
+function onRecordingStopped(data) {
+  document.getElementById('btn-record-start').style.display = '';
+  document.getElementById('btn-record-stop').style.display  = 'none';
+  document.getElementById('rec-indicator').classList.remove('active');
+  if (data?.audioFile) addLog('info', `Recording saved: ${data.audioFile}`);
+  setTimeout(loadCaptures, 800);
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
+applyTheme(localStorage.getItem('sip-theme') || 'light');
 connectWS();
 addLog('info','SIP Endpoint UI initialised');
 requestNotifPermission();
