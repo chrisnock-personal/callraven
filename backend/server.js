@@ -65,7 +65,12 @@ sipManager.on('playbackEnded',     (d) => broadcast('playbackEnded', d));
 
 sipManager.on('callEnded', (data) => {
   broadcast('callEnded', data);
-  if (data.callId) captureManager.stopCapture(data.callId);
+  // Capture is stopped explicitly in /api/hangup for local hangups.
+  // For remote hangups (far end sends BYE), stop it here after a small
+  // delay so any final SIP messages (remote BYE) have time to be written.
+  if (data.callId) {
+    setTimeout(() => captureManager.stopCapture(data.callId), 100);
+  }
 });
 
 sipManager.on('callHeld',    (d) => broadcast('callHeld', d));
@@ -130,8 +135,15 @@ app.post('/api/hangup', async (req, res) => {
   const callId = state.activeCall.callId;
   try {
     await sipManager.hangup();
-    const captureFile = captureManager.stopCapture(callId);
-    res.json({ success: true, captureFile: captureFile ? `/captures/${path.basename(captureFile)}` : null });
+    // Capture is stopped via callEnded event (with delay for final SIP messages)
+    // Wait briefly then get the filename for the response
+    await new Promise(r => setTimeout(r, 150));
+    const writer = captureManager.getWriter ? captureManager.getWriter(callId) : null;
+    // If still open (callEnded delay hasn't fired yet), stop it now
+    const captureFile = captureManager.stopCapture(callId) ||
+                        path.join(__dirname, '../captures',
+                          `call_${new Date().toISOString().replace(/[:.]/g, '-')}_${callId.slice(0,8)}.pcap`);
+    res.json({ success: true, captureFile: captureFile ? `/captures/${path.basename(String(captureFile))}` : null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
