@@ -1,3 +1,5 @@
+<p align="center"><img width="472" height="495" alt="Image" src="https://github.com/user-attachments/assets/0b4a14aa-f344-41f0-b744-44516543e04b" /></p>
+
 # SIP Endpoint — Containerized Web Softphone
 
 A fully containerized SIP softphone with a web UI, complete REST API for headless operation, per-call packet capture (INVITE/100/180/200/ACK/BYE + RTP), inbound audio recording, WAV file playback into the RTP stream, live audio relay to the browser, and on-demand call recording.
