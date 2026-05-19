@@ -75,7 +75,8 @@
       color: var(--text);
       font-family: var(--sans);
       font-size: 14px;
-      min-height: 100vh;
+      height: 100vh;        /* fixed viewport height — children can't exceed this */
+      overflow: hidden;
       display: flex;
       flex-direction: column;
     }
@@ -160,11 +161,11 @@
 
     /* ── Layout ──────────────────────────────────────────────────────── */
     main {
-      flex: 1;
+      flex: 1 1 0;
       display: grid;
       grid-template-columns: 288px 1fr 300px;
-      grid-template-rows: 1fr auto;
-      height: calc(100vh - 58px);
+      grid-template-rows: 1fr;
+      min-height: 0;          /* critical — lets flex:1 be bounded by parent */
       overflow: hidden;
     }
 
@@ -349,6 +350,20 @@
       border-color: transparent;
     }
     .btn-ghost:hover { background: var(--bg2); color: var(--text); }
+
+    /* Capture card action buttons — consistent Option A tinted style */
+    .btn-cap-pcap { background: var(--blue-light); color: var(--blue); border-color: var(--blue-mid); }
+    .btn-cap-pcap:hover { filter: brightness(.92); }
+    .btn-cap-wav  { background: var(--info-light);   color: var(--info);   border-color: var(--info); }
+    .btn-cap-wav:hover  { filter: brightness(.92); }
+    .btn-cap-play { background: var(--green-light);  color: var(--green);  border-color: var(--green-border); }
+    .btn-cap-play:hover { filter: brightness(.92); }
+    .btn-cap-tsc  { background: var(--violet-light); color: var(--violet); border-color: rgba(124,58,237,.3); min-width: 70px; }
+    .btn-cap-tsc:hover  { background: var(--violet); color: #fff; border-color: var(--violet); }
+    .btn-cap-tsc.done   { cursor: default; }
+    .btn-cap-tsc.done:hover { background: var(--violet-light); color: var(--violet); border-color: rgba(124,58,237,.3); }
+    .btn-cap-del  { background: transparent; color: var(--red); border-color: transparent; }
+    .btn-cap-del:hover  { background: var(--red-light); }
 
     .btn-full { width: 100%; }
     .btn-sm   { padding: 6px 11px; font-size: 12px; }
@@ -543,6 +558,210 @@
     .tab-content.active { display: block; }
 
     /* ── Capture cards ───────────────────────────────────────────────── */
+    /* ── Transcription ──────────────────────────────────────────────────── */
+    /* Icon buttons for call history */
+    .ico-btn {
+      width: 30px; height: 30px; border-radius: 7px;
+      border: 1px solid var(--border2); background: var(--surface);
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center; font-size: 13px; transition: all .15s;
+      position: relative; flex-shrink: 0; text-decoration: none;
+    }
+    .ico-btn:hover { filter: brightness(1.08); }
+    .ico-btn:disabled { opacity: .3; cursor: not-allowed; filter: none; pointer-events: none; }
+    .ico-btn.pcap  { background: var(--blue-light);   color: var(--blue);   border-color: var(--blue-mid); }
+    .ico-btn.wav   { background: var(--info-light);   color: var(--info);   border-color: var(--info); }
+    .ico-btn.play  { background: var(--green-light);  color: var(--green);  border-color: var(--green-border); }
+    .ico-btn.del   { background: transparent; color: var(--text-dim); border-color: transparent; }
+    .ico-btn.del:hover { background: var(--red-light); color: var(--red); }
+    .ico-btn::after {
+      content: attr(data-tip);
+      position: absolute; bottom: calc(100% + 5px); left: 50%;
+      transform: translateX(-50%);
+      background: #1a2332; color: #e2e8f0;
+      font-size: 10px; font-family: var(--sans); font-weight: 500;
+      padding: 3px 8px; border-radius: 5px; white-space: nowrap;
+      pointer-events: none; opacity: 0; transition: opacity .15s; z-index: 100;
+    }
+    .ico-btn:hover::after { opacity: 1; }
+
+    .capture-item.has-transcript { border-left: 3px solid var(--violet); }
+    .transcript-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 10px; font-weight: 600; color: var(--violet);
+      background: var(--violet-light); padding: 3px 8px; border-radius: 20px;
+      border: 1px solid rgba(124,58,237,.2);
+    }
+    .btn-transcribe {
+      background: var(--violet-light); color: var(--violet);
+      border-color: rgba(124,58,237,.3);
+    }
+    .btn-transcribe:hover { background: var(--violet); color: #fff; border-color: var(--violet); }
+    .transcribing-inline {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--amber); font-weight: 500; padding: 6px 0;
+    }
+    .tc-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; margin-bottom: 10px; overflow: hidden;
+      box-shadow: var(--shadow-sm);
+    }
+    .tc-header {
+      padding: 11px 14px; display: flex; align-items: flex-start; gap: 10px;
+      cursor: pointer; transition: background .15s; user-select: none;
+    }
+    .tc-header:hover { background: var(--bg2); }
+    .tc-icon { font-size: 15px; flex-shrink: 0; margin-top: 2px; }
+    .tc-info { flex: 1; min-width: 0; }
+    .tc-name { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tc-meta { font-size: 11px; color: var(--text-dim); font-family: var(--mono); font-weight: 300; }
+    .tc-acts { display: flex; gap: 4px; flex-shrink: 0; }
+    .tc-chev { font-size: 9px; color: var(--text-dim); margin-top: 4px; flex-shrink: 0;
+      transition: transform .2s; }
+    .tc-card.open .tc-chev { transform: rotate(180deg); }
+    .tc-body { display: none; border-top: 1px solid var(--border);
+      padding: 14px 16px; background: var(--surface2); }
+    .tc-card.open .tc-body { display: block; }
+    .tc-text { font-size: 13px; line-height: 1.85; color: var(--text); }
+    .tc-text p { margin-bottom: 8px; }
+    .tc-text p:last-child { margin-bottom: 0; }
+    .tc-ts { font-family: var(--mono); font-size: 10px; font-weight: 500;
+      color: var(--violet); background: var(--violet-light);
+      padding: 1px 5px; border-radius: 4px; margin-right: 6px; display: inline-block; }
+    .tc-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px; }
+    .tc-stats { font-size: 11px; color: var(--text-dim); flex: 1;
+      font-family: var(--mono); font-weight: 300; }
+    .proc-banner {
+      margin: 0 0 12px; padding: 10px 14px;
+      background: var(--amber-light); border: 1px solid var(--amber);
+      border-radius: 8px; display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: var(--amber); font-weight: 500;
+    }
+    .tab-count {
+      background: var(--blue-light); color: var(--blue); font-size: 10px;
+      font-weight: 600; min-width: 16px; height: 16px; border-radius: 20px;
+      padding: 0 4px; display: inline-flex; align-items: center; justify-content: center;
+    }
+
+    /* ── Inline audio player ─────────────────────────────────────────── */
+    .capture-item.playing {
+      border-color: var(--green);
+      box-shadow: 0 0 0 3px rgba(5,150,105,.12);
+    }
+    .audio-player {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--bg2);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .player-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .player-label {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--green);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex: 1;
+    }
+    .player-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: badge-pulse 1s infinite;
+    }
+    .player-time {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .progress-wrap {
+      position: relative;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      cursor: pointer;
+      margin-bottom: 8px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--green);
+      border-radius: 2px;
+      pointer-events: none;
+      transition: width .1s linear;
+    }
+    .progress-thumb {
+      position: absolute;
+      top: 50%;
+      width: 12px;
+      height: 12px;
+      background: var(--green);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 0 0 3px rgba(5,150,105,.25);
+      pointer-events: none;
+    }
+    .player-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .ctrl-btn {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 1px solid var(--border2);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      box-shadow: var(--shadow-sm);
+      transition: all .15s;
+      flex-shrink: 0;
+    }
+    .ctrl-btn:hover { background: var(--blue); color: #fff; border-color: var(--blue); }
+    .ctrl-btn.paused { background: var(--green); color: #fff; border-color: var(--green); }
+    .volume-wrap {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-left: auto;
+    }
+    .volume-icon { font-size: 11px; color: var(--text-dim); }
+    .volume-slider { width: 56px; height: 3px; accent-color: var(--blue); cursor: pointer; }
+    .player-waveform {
+      display: flex;
+      align-items: center;
+      gap: 1.5px;
+      height: 20px;
+    }
+    .pwv-bar {
+      width: 3px;
+      background: var(--green);
+      border-radius: 2px;
+      transition: height .1s;
+    }
+    .pwv-bar.active { animation: wavebar .7s ease-in-out infinite; }
+    .pwv-bar.active:nth-child(2) { animation-delay:.1s; }
+    .pwv-bar.active:nth-child(3) { animation-delay:.2s; }
+    .pwv-bar.active:nth-child(4) { animation-delay:.15s; }
+    .pwv-bar.active:nth-child(5) { animation-delay:.25s; }
+    .pwv-bar.active:nth-child(6) { animation-delay:.05s; }
+    .pwv-bar.active:nth-child(7) { animation-delay:.2s; }
+    @keyframes wavebar { 0%,100%{height:3px;} 50%{height:18px;} }
+
     .capture-item {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -554,9 +773,12 @@
     }
     .capture-item:hover { box-shadow: var(--shadow); }
 
-    .capture-name { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 3px; word-break: break-all; }
+    .capture-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 3px; }
+    .capture-name { font-size: 12px; font-weight: 500; color: var(--text); word-break: break-all; }
     .capture-meta { font-size: 11px; color: var(--text-dim); display: flex; gap: 10px; margin-bottom: 9px; font-family: var(--mono); font-weight: 300; }
     .capture-actions { display: flex; gap: 5px; }
+    .btn-cap-del-inline { background: transparent; color: var(--text-dim); border: none; cursor: pointer; font-size: 13px; padding: 0 2px; line-height: 1; flex-shrink: 0; transition: color .15s; }
+    .btn-cap-del-inline:hover { color: var(--red); }
 
     /* ── WAV items ───────────────────────────────────────────────────── */
     .wav-item {
@@ -588,17 +810,66 @@
     .upload-zone:hover { border-color: var(--blue); background: var(--blue-light); }
     .upload-zone-text { font-size: 13px; font-weight: 500; color: var(--text-mid); }
 
+    /* ── Call History (merged with Captures) ───────────────────────────── */
+    .call-entry {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; margin-bottom: 8px; overflow: hidden;
+      box-shadow: var(--shadow-sm); cursor: pointer;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .call-entry:hover { border-color: var(--border2); box-shadow: var(--shadow); }
+    .call-entry.open  { border-color: var(--blue-mid); }
+    .call-entry.has-transcript { border-left: 3px solid var(--violet); }
+    .call-summary { padding: 10px 12px; }
+    .call-caps { display: flex; gap: 4px; margin-left: auto; }
+    .cap-pill {
+      font-size: 9px; font-weight: 600; padding: 1px 6px;
+      border-radius: 20px; border: 1px solid transparent;
+      display: inline-flex; align-items: center;
+    }
+    .cap-pill.pcap { background: var(--blue-light);   color: var(--blue);   border-color: var(--blue-mid); }
+    .cap-pill.wav  { background: var(--info-light);   color: var(--info);   border-color: var(--info); }
+    .cap-pill.tsc  { background: var(--violet-light); color: var(--violet); border-color: rgba(124,58,237,.2); }
+    .call-detail { display: none; border-top: 1px solid var(--border); background: var(--surface2); }
+    .call-entry.open .call-detail { display: block; }
+    .detail-section { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    .detail-section:last-child { border-bottom: none; }
+    .detail-section-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--text-dim); margin-bottom: 8px;
+    }
+    .detail-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; font-size: 12px; }
+    .detail-row:last-child { margin-bottom: 0; }
+    .detail-label {
+      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--text-dim); min-width: 56px; flex-shrink: 0;
+    }
+    .detail-value { color: var(--text); font-family: var(--mono); font-size: 11px; }
+    .capture-actions { display: flex; gap: 5px; flex-wrap: wrap; padding: 10px 14px; }
+
     /* ── History ─────────────────────────────────────────────────────── */
     .history-item {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 10px 12px;
       margin-bottom: 7px;
       box-shadow: var(--shadow-sm);
+      cursor: pointer;
+      transition: border-color .15s, box-shadow .15s;
+      overflow: hidden;
     }
+    .history-item:hover { border-color: var(--border2); box-shadow: var(--shadow); }
+    .history-item.open  { border-color: var(--blue-mid); }
 
-    .history-row-1 { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+    .history-summary { padding: 10px 12px; }
+    .history-row-1 {
+      display: grid;
+      grid-template-columns: auto 1fr auto auto auto;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 5px;
+    }
+    .history-callid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .history-row-2 { display: flex; align-items: center; gap: 7px; }
 
     .history-dir {
@@ -611,23 +882,25 @@
     }
     .history-dir.inbound  { background: var(--green-light); color: var(--green); }
     .history-dir.outbound { background: var(--blue-light);  color: var(--blue);  }
+    .history-dir.missed   { background: var(--amber-light); color: var(--amber); }
 
-    .history-target {
-      font-size: 13px;
-      font-weight: 500;
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      letter-spacing: -0.01em;
+    .history-callid {
+      font-size: 12px; font-weight: 500; font-family: var(--mono);
+      flex: 1; min-width: 0; color: var(--text);
     }
 
     .history-status { font-size: 11px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
     .history-status.completed { color: var(--green); }
     .history-status.missed    { color: var(--amber); }
     .history-status.failed    { color: var(--red); }
+    .history-status.cancelled { color: var(--text-dim); }
     .history-status.active    { color: var(--blue); }
+
+    .history-chev {
+      font-size: 9px; color: var(--text-dim);
+      transition: transform .2s; flex-shrink: 0; margin-left: 2px;
+    }
+    .history-item.open .history-chev { transform: rotate(180deg); }
 
     .history-duration {
       font-family: var(--mono);
@@ -640,6 +913,38 @@
       padding: 1px 6px;
       white-space: nowrap;
       flex-shrink: 0;
+    }
+
+    /* Expanded detail panel */
+    .history-detail {
+      display: none;
+      border-top: 1px solid var(--border);
+      padding: 10px 12px;
+      background: var(--surface2);
+    }
+    .history-item.open .history-detail { display: block; }
+    .history-item.open .history-detail .tc-text-wrap {
+      max-height: 220px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .history-item.open .history-detail .tc-text-wrap::-webkit-scrollbar { width: 3px; }
+    .history-item.open .history-detail .tc-text-wrap::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+    .detail-row {
+      display: flex; align-items: baseline; gap: 8px;
+      margin-bottom: 6px; font-size: 12px;
+    }
+    .detail-row:last-child { margin-bottom: 0; }
+    .detail-label {
+      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--text-dim); min-width: 60px; flex-shrink: 0;
+    }
+    .detail-value {
+      color: var(--text); font-family: var(--mono); font-size: 11px; word-break: break-all;
+    }
+    .detail-actions {
+      display: flex; gap: 5px; margin-top: 10px; padding-top: 10px;
+      border-top: 1px solid var(--border); flex-wrap: wrap;
     }
 
     .history-time {
@@ -660,44 +965,47 @@
     /* ── WAV status ──────────────────────────────────────────────────── */
     #wav-status { font-size: 12px; color: var(--text-mid); margin-top: 8px; }
 
-    /* ── Log panel ───────────────────────────────────────────────────── */
-    .log-panel {
-      grid-column: 1/-1;
-      border-top: 1px solid var(--border);
-      height: 148px;
+    /* ── Inline log (centre column, below WAV) ───────────────────────── */
+    .log-inline {
+      flex: 0 0 160px;
+      overflow: hidden;
+      border-top: 2px solid var(--blue-mid);
+      background: var(--surface);
       display: flex;
       flex-direction: column;
-      background: var(--surface);
-      transition: height 0.25s cubic-bezier(0.4,0,0.2,1);
+    }
+    .log-inline.collapsed {
+      flex: 0 0 37px;
     }
 
-    .log-panel.collapsed { height: 42px; }
-    .log-panel.expanded  { height: 340px; }
-
-    .log-panel > .panel-header {
-      padding: 7px 20px;
+    .log-inline-header {
+      height: 37px;
+      min-height: 37px;
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
       cursor: pointer;
       user-select: none;
       flex-shrink: 0;
+      border-bottom: 1px solid var(--border);
     }
-    .log-panel > .panel-header:hover { background: var(--bg2); }
+    .log-inline-header:hover { background: var(--bg2); }
 
     .log-toggle-arrow {
       font-size: 10px;
       color: var(--text-dim);
       transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
     }
-    .log-panel.collapsed .log-toggle-arrow { transform: rotate(-90deg); }
-    .log-panel.expanded  .log-toggle-arrow { transform: rotate(180deg); }
+    .log-inline.collapsed .log-toggle-arrow { transform: rotate(-90deg); }
 
     .log-entries-wrap {
-      flex: 1;
+      height: 123px;   /* 160px log - 37px header */
       overflow: hidden;
-      display: flex;
-      flex-direction: column;
-      transition: opacity 0.15s;
     }
-    .log-panel.collapsed .log-entries-wrap { opacity: 0; pointer-events: none; }
+    .log-inline.collapsed .log-entries-wrap {
+      display: none;
+    }
 
     .log-count {
       display: inline-flex;
@@ -713,10 +1021,10 @@
       padding: 0 5px;
       transition: opacity 0.15s;
     }
-    .log-panel:not(.collapsed) .log-count { opacity: 0; }
+    .log-inline:not(.collapsed) .log-count { opacity: 0; }
 
     .log-entries {
-      flex: 1;
+      height: 123px;
       overflow-y: auto;
       padding: 6px 20px;
       font-family: var(--mono);
@@ -917,7 +1225,6 @@
         overflow-y: auto;
       }
       .panel:nth-child(3) { grid-column: 1 / -1; border-right: none; border-top: 1px solid var(--border); max-height: 400px; }
-      .log-panel { grid-column: 1 / -1; }
     }
 
     @media (max-width: 768px) {
@@ -926,7 +1233,6 @@
       .logo-version { display: none; }
       .status-badge { padding: 4px 8px; font-size: 11px; }
       .panel { border-right: none; border-bottom: 1px solid var(--border); }
-      .log-panel { grid-column: 1; height: 200px; }
       .dtmf-key { height: 40px; font-size: 15px; }
       .stats-grid { grid-template-columns: repeat(3,1fr) !important; }
     }
@@ -1052,8 +1358,9 @@
     </div>
   </div>
 
-  <!-- CENTER: Dialpad + Controls -->
-  <div class="panel">
+  <!-- CENTER: Dialpad + Controls + Inline Log -->
+  <div class="panel" style="display:flex;flex-direction:column;overflow:hidden;">
+    <div id="centre-scroll" style="overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;">
 
     <!-- Call display -->
     <div class="call-display">
@@ -1178,21 +1485,34 @@
       <div id="wav-status"></div>
     </div>
 
+    </div><!-- end scroll wrapper -->
+
+    <!-- System Log — inline, flush below WAV, fills remaining height -->
+    <div class="log-inline" id="log-panel">
+      <div class="log-inline-header" onclick="toggleLog()">
+        <div class="panel-title" style="display:flex;align-items:center;gap:8px;">
+          System Log
+          <span class="log-count" id="log-count">0</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <a href="/api/log/export" download class="btn btn-ghost btn-sm" style="text-decoration:none;" onclick="event.stopPropagation()">↓ Export</a>
+          <button class="btn btn-ghost btn-sm" onclick="clearLog();event.stopPropagation()">Clear</button>
+          <span class="log-toggle-arrow">▲</span>
+        </div>
+      </div>
+      <div class="log-entries-wrap">
+        <div class="log-entries" id="log-entries"></div>
+      </div>
+    </div>
+
   </div>
 
   <!-- RIGHT: Captures + WAV + History -->
   <div class="panel" style="border-right:none;">
     <div class="tabs">
-      <button class="tab active" onclick="switchTab(this,'tab-captures')">Captures</button>
+      <button class="tab active" onclick="switchTab(this,'tab-history');loadHistory()">Call History</button>
       <button class="tab" onclick="switchTab(this,'tab-wavfiles')">WAV Files</button>
-      <button class="tab" onclick="switchTab(this,'tab-history');loadHistory()">History</button>
-    </div>
 
-    <div id="tab-captures" class="tab-content active">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
-        <button class="btn btn-ghost btn-sm" onclick="loadCaptures()">↻ Refresh</button>
-      </div>
-      <div id="capture-list"><div class="empty-state">No captures yet</div></div>
     </div>
 
     <div id="tab-wavfiles" class="tab-content">
@@ -1204,33 +1524,18 @@
       <div id="wav-list"><div class="empty-state">No WAV files uploaded</div></div>
     </div>
 
-    <div id="tab-history" class="tab-content">
-      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
-        <button class="btn btn-ghost btn-sm" onclick="loadHistory()">↻</button>
-        <a href="/api/history/export" download class="btn btn-outline btn-sm" style="text-decoration:none;">↓ CSV</a>
-        <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="clearHistory()">✕ Clear</button>
+    <div id="tab-history" class="tab-content active">
+      <div style="display:flex;gap:6px;margin-bottom:12px;align-items:center;">
+        <button class="btn btn-ghost btn-sm" onclick="loadHistory()" title="Refresh">↻ Refresh</button>
+        <a href="/api/history/export" download class="btn btn-ghost btn-sm" style="text-decoration:none;">↓ CSV</a>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red);margin-left:auto;" onclick="clearHistory()">✕ Clear</button>
       </div>
-      <div id="history-list"><div class="empty-state">No call history</div></div>
+      <div id="history-list"><div class="empty-state">No call history yet</div></div>
     </div>
+
+
   </div>
 
-  <!-- Log -->
-  <div class="log-panel" id="log-panel">
-    <div class="panel-header" onclick="toggleLog()">
-      <div class="panel-title" style="display:flex;align-items:center;gap:8px;">
-        System Log
-        <span class="log-count" id="log-count">0</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <a href="/api/log/export" download class="btn btn-ghost btn-sm" style="text-decoration:none;" onclick="event.stopPropagation()">↓ Export</a>
-        <button class="btn btn-ghost btn-sm" onclick="clearLog();event.stopPropagation()">Clear</button>
-        <span class="log-toggle-arrow">▲</span>
-      </div>
-    </div>
-    <div class="log-entries-wrap">
-      <div class="log-entries" id="log-entries"></div>
-    </div>
-  </div>
 
 </main>
 
@@ -1264,7 +1569,7 @@ function handleWSMessage({ type, data }) {
     case 'conferenceStarted': onConfStarted(data); break;
     case 'conferenceEnded':  onConfEnded(); break;
     case 'playbackEnded':    onPlaybackEnded(data); break;
-    case 'captureReady':     addLog('info',`Capture ready: ${data.filename} (${fmtSize(data.size)})`); loadCaptures(); break;
+    case 'captureReady':     addLog('info',`Capture ready: ${data.filename} (${fmtSize(data.size)})`); break;
     case 'callHeld':         onCallHeld(data); break;
     case 'callResumed':      onCallResumed(data); break;
     case 'log':              addLog(data.level, data.message); break;
@@ -1296,7 +1601,7 @@ function applyState(s) {
     document.getElementById('btn-call').style.display   = 'none';
     document.getElementById('btn-hangup').style.display = '';
   }
-  loadCaptures();
+  loadHistory();
   loadWavFiles();
   if (s.logs) [...s.logs].reverse().forEach(l => addLog(l.level, l.message, l.timestamp));
 }
@@ -1364,7 +1669,7 @@ function onCallEnded(data) {
   setLabel('call-label','Idle');
   onConfEnded();
   addLog('info',`Call ended${data.cause ? ': '+data.cause : ''}`);
-  setTimeout(loadCaptures, 1500);
+  setTimeout(loadHistory, 1500);
 }
 
 function onConfStarted(data) {
@@ -1497,25 +1802,7 @@ async function doStopWav() {
 }
 
 // ─── Captures ────────────────────────────────────────────────────────────────
-async function loadCaptures() {
-  const r = await api('GET','/api/captures');
-  const list = document.getElementById('capture-list');
-  if (!r.captures || !r.captures.length) {
-    list.innerHTML = '<div class="empty-state">No captures yet</div>'; return;
-  }
-  list.innerHTML = r.captures.map(c => `
-    <div class="capture-item">
-      <div class="capture-name">${c.filename}</div>
-      <div class="capture-meta"><span>${fmtSize(c.size)}</span><span>${fmtDate(c.created)}</span></div>
-      <div class="capture-actions">
-        <a href="${c.url}" download class="btn btn-primary btn-sm" style="text-decoration:none;">↓ PCAP</a>
-        ${c.audioUrl ? `<a href="${c.audioUrl}" download class="btn btn-info btn-sm" style="text-decoration:none;">↓ WAV</a>` : ''}
-        <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="deleteCap('${c.filename}')">✕</button>
-      </div>
-    </div>`).join('');
-}
-
-async function deleteCap(filename) { await api('DELETE',`/api/captures/${filename}`); loadCaptures(); }
+async function deleteCap(filename) { await api('DELETE',`/api/captures/${filename}`); loadHistory(); }
 
 // ─── WAV files ────────────────────────────────────────────────────────────────
 async function loadWavFiles() {
@@ -1710,39 +1997,118 @@ async function doResume() {
 
 // ─── Call History ─────────────────────────────────────────────────────────────
 async function loadHistory() {
-  const r = await api('GET','/api/history');
+  const r    = await api('GET', '/api/history');
   const list = document.getElementById('history-list');
   if (!r.history || !r.history.length) {
-    list.innerHTML = '<div class="empty-state">No call history</div>';
+    list.innerHTML = '<div class="empty-state">No call history yet</div>';
     return;
   }
-  list.innerHTML = r.history.map(h => {
-    const dur  = h.duration != null
-      ? `${Math.floor(h.duration/60)}m ${h.duration%60}s`
+
+  list.innerHTML = r.history.map(function(h) {
+    const dur      = h.duration != null
+      ? Math.floor(h.duration/60) + 'm ' + (h.duration%60) + 's'
       : h.status === 'active' ? 'active…' : '—';
-    const d    = h.startTime ? new Date(h.startTime) : null;
-    const time = d ? d.toLocaleDateString([], {day:'2-digit',month:'2-digit',year:'2-digit'})
-                   + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
-    const cap  = h.captureFile
-      ? `<a href="${h.captureFile}" download style="color:var(--blue);font-family:var(--mono);font-size:10px;font-weight:400;text-decoration:none;flex-shrink:0;">↓ pcap</a>`
-      : '';
+    const d        = h.startTime ? new Date(h.startTime) : null;
+    const timeStr  = d ? d.toLocaleDateString([],{day:'2-digit',month:'2-digit',year:'2-digit'})
+                       + ' ' + d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+    const startIso = h.startTime ? h.startTime.replace('T',' ').replace(/\.\d+Z$/,'') : '—';
+    const endIso   = h.endTime   ? h.endTime.replace('T',' ').replace(/\.\d+Z$/,'')   : '—';
+    const callId   = h.callId ? h.callId.slice(0,8) : '—';
     const dirArrow = h.direction === 'inbound' ? '↙' : '↗';
-    const dirLabel = h.direction === 'inbound' ? 'Inbound' : 'Outbound';
-    const name     = h.displayName && h.displayName !== h.target ? h.displayName : (h.target || '—');
-    return `<div class="history-item">
-      <div class="history-row-1">
-        <span class="history-dir ${h.direction}">${dirArrow} ${dirLabel}</span>
-        <span class="history-target" title="${h.target || ''}">${name}</span>
-        <span class="history-status ${h.status}">${h.status.charAt(0).toUpperCase()+h.status.slice(1)}</span>
-      </div>
-      <div class="history-row-2">
-        <span class="history-duration">${dur}</span>
-        <span class="history-time">${time}</span>
-        ${cap}
-      </div>
-    </div>`;
+    const dirLabel = h.status === 'missed' ? 'Missed' : h.direction === 'inbound' ? 'Inbound' : 'Outbound';
+    const dirClass = h.status === 'missed' ? 'missed' : (h.direction || 'outbound');
+    const statusLabel = h.status.charAt(0).toUpperCase() + h.status.slice(1);
+    const statusColor = h.status === 'completed' ? 'var(--green)' : h.status === 'failed' ? 'var(--red)' : h.status === 'missed' ? 'var(--amber)' : 'var(--blue)';
+
+    // ── Capture section ──────────────────────────────────────────────────────
+    const hasCap = !!h.captureFile;
+    const hasWav = !!h.audioUrl;
+    const capSection = (hasCap || hasWav) ? (
+      '<div style="border-top:1px solid var(--border);padding:10px 12px;background:var(--surface);">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+          '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);">Capture</div>' +
+          '<button class="ico-btn del" data-tip="Delete capture only" style="width:22px;height:22px;font-size:11px;" onclick="event.stopPropagation();deleteCapture(\'' + h.callId + '\')">✕</button>' +
+        '</div>' +
+        '<div style="display:flex;gap:6px;">' +
+          (hasCap ? '<a href="' + h.captureFile + '" download class="ico-btn pcap" data-tip="Download PCAP" style="text-decoration:none;" onclick="event.stopPropagation()">↓</a>' : '<button class="ico-btn pcap" disabled data-tip="No PCAP">↓</button>') +
+          (hasWav ? '<a href="' + h.audioUrl + '" download class="ico-btn wav" data-tip="Download WAV" style="text-decoration:none;" onclick="event.stopPropagation()">♪</a>' : '<button class="ico-btn wav" disabled data-tip="No recording">♪</button>') +
+          (hasWav ? '<button class="ico-btn play" data-tip="Play recording" onclick="event.stopPropagation();histPlayToggle(\'' + callId + '\',\'' + h.audioUrl + '\')">▶</button>' : '<button class="ico-btn play" disabled data-tip="No recording">▶</button>') +
+        '</div>' +
+        (hasWav ? '<div id="hist-player-' + callId + '" style="display:none;padding:8px 4px 4px;"></div>' : '') +
+      '</div>'
+    ) : '';
+
+    // ── Transcript section ───────────────────────────────────────────────────
+    var tcSection = '';
+    if (hasWav) {
+      if (h.transcriptFile) {
+        var tscHtml = tcSegmentCache[h.callId] || '<div style="color:var(--text-dim);font-size:11px;">Loading…</div>';
+        tcSection =
+          '<div style="border-top:1px solid var(--border);padding:10px 12px;background:var(--surface2);">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+              '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);">Transcript</div>' +
+              '<div style="display:flex;gap:4px;">' +
+                '<button class="btn btn-outline btn-sm" style="font-size:10px;padding:3px 8px;" onclick="event.stopPropagation();copyTranscript(\'' + h.callId + '\')">Copy</button>' +
+                '<a href="/api/transcripts/' + h.transcriptFile + '/text" download class="btn btn-outline btn-sm" style="font-size:10px;padding:3px 8px;text-decoration:none;" onclick="event.stopPropagation()">↓ TXT</a>' +
+                '<button class="btn btn-ghost btn-sm" style="font-size:12px;color:var(--red);" onclick="event.stopPropagation();deleteTranscriptForCall(\'' + h.callId + '\')">✕</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="tc-text-wrap"><div id="tc-text-' + h.callId.slice(0,8) + '" style="font-size:12px;line-height:1.8;color:var(--text);">' + tscHtml + '</div></div>' +
+          '</div>';
+      } else {
+        tcSection =
+          '<div style="border-top:1px solid var(--border);padding:10px 12px;background:var(--surface2);">' +
+            '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-bottom:8px;">Transcript</div>' +
+            '<div style="font-size:11px;color:var(--text-dim);display:flex;align-items:center;gap:8px;">No transcript yet ' +
+              '<button class="btn-transcribe" style="font-size:11px;padding:3px 9px;" onclick="event.stopPropagation();doTranscribeFromHistory(\'' + (h.audioFile||'') + '\',\'' + h.callId + '\')">✍ Transcribe</button>' +
+            '</div>' +
+          '</div>';
+      }
+    }
+
+    // ── Detail rows ──────────────────────────────────────────────────────────
+    var detailRows =
+      '<div class="detail-row"><div class="detail-label">Call ID</div><div class="detail-value">' + callId + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">From</div><div class="detail-value">' + stripSip(h.from || (h.direction === 'inbound' ? h.target : '—') || '—') + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">To</div><div class="detail-value">' + stripSip(h.to || (h.direction === 'outbound' ? h.target : '—') || '—') + '</div></div>' +
+      
+      '<div class="detail-row"><div class="detail-label">Status</div><div class="detail-value" style="color:' + statusColor + ';">' + statusLabel + (h.cause ? ' — ' + h.cause : '') + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">Duration</div><div class="detail-value">' + dur + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">Started</div><div class="detail-value">' + startIso + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">Ended</div><div class="detail-value">' + endIso + '</div></div>' +
+      (h.codec ? '<div class="detail-row"><div class="detail-label">Codec</div><div class="detail-value">' + h.codec + '</div></div>' : '') +
+      (h.rxPackets != null ? '<div class="detail-row"><div class="detail-label">RX / TX</div><div class="detail-value">' + h.rxPackets.toLocaleString() + ' / ' + (h.txPackets||0).toLocaleString() + ' pkts</div></div>' : '') +
+      (h.packetLoss != null ? '<div class="detail-row"><div class="detail-label">Loss</div><div class="detail-value">' + parseFloat(h.packetLoss).toFixed(1) + '%</div></div>' : '') +
+      (h.jitterMs != null && h.jitterMs > 0 ? '<div class="detail-row"><div class="detail-label">Jitter</div><div class="detail-value">' + h.jitterMs + ' ms</div></div>' : '');
+
+    return '<div class="history-item' + (h.transcriptFile ? ' has-transcript' : '') + '" onclick="this.classList.toggle(&apos;open&apos;)">' +
+      '<div class="history-summary">' +
+        '<div class="history-row-1">' +
+          '<span class="history-dir ' + dirClass + '">' + dirArrow + ' ' + dirLabel + '</span>' +
+          '<span class="history-callid">' + callId + '</span>' +
+          '<span class="history-status ' + h.status + '">' + statusLabel + '</span>' +
+          '<span class="history-chev">▼</span>' +
+          '<button class="ico-btn del" data-tip="Delete call + all files" style="width:20px;height:20px;font-size:11px;" onclick="event.stopPropagation();deleteCallEntry(\'' + h.callId + '\')">✕</button>' +
+        '</div>' +
+        '<div class="history-row-2">' +
+          '<span class="history-duration">' + dur + '</span>' +
+          '<span class="history-time">' + timeStr + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="history-detail">' +
+        '<div style="padding:10px 12px;background:var(--surface2);">' + detailRows + '</div>' +
+        capSection +
+        tcSection +
+      '</div>' +
+    '</div>';
   }).join('');
+
+  // Load transcripts after DOM ready
+  r.history.forEach(function(h) {
+    if (h.transcriptFile) setTimeout(function(){ loadTranscriptForCard(h.callId, h.transcriptFile); }, 50);
+  });
 }
+
 
 async function clearHistory() {
   if (!confirm('Clear all call history?')) return;
@@ -1755,16 +2121,12 @@ let logCount = 0;
 
 function toggleLog() {
   const panel = document.getElementById('log-panel');
-  if (panel.classList.contains('collapsed')) {
-    panel.classList.remove('collapsed');
+  panel.classList.toggle('collapsed');
+  if (!panel.classList.contains('collapsed')) {
     logCount = 0;
     document.getElementById('log-count').textContent = '0';
-  } else if (panel.classList.contains('expanded')) {
-    panel.classList.remove('expanded');
-  } else {
-    // default -> expanded
-    panel.classList.add('expanded');
   }
+  setTimeout(sizeCentreScroll, 50);
 }
 
 // ─── Web Audio — inbound call playback ────────────────────────────────────────
@@ -1916,7 +2278,7 @@ async function doRecordStop() {
   document.getElementById('btn-record-stop').style.display  = 'none';
   document.getElementById('rec-indicator').classList.remove('active');
   addLog('info', `Recording saved${r.audioFile ? ': ' + r.audioFile : ''}`);
-  setTimeout(loadCaptures, 1000);
+  setTimeout(loadHistory, 1000);
 }
 
 function resetRecordingUI() {
@@ -2012,7 +2374,7 @@ function onRecordingStopped(data) {
   document.getElementById('btn-record-stop').style.display  = 'none';
   document.getElementById('rec-indicator').classList.remove('active');
   if (data.audioFile) addLog('info', `Recording: ${data.audioFile}`);
-  setTimeout(loadCaptures, 1000);
+  setTimeout(loadHistory, 1000);
 }
 
 // ─── Dark mode ────────────────────────────────────────────────────────────────
@@ -2079,13 +2441,402 @@ function onRecordingStopped(data) {
   document.getElementById('btn-record-stop').style.display  = 'none';
   document.getElementById('rec-indicator').classList.remove('active');
   if (data?.audioFile) addLog('info', `Recording saved: ${data.audioFile}`);
-  setTimeout(loadCaptures, 800);
+  setTimeout(loadHistory, 800);
+}
+
+// ─── Transcription ───────────────────────────────────────────────────────────
+const tcJobStatus = {}; // recFilename -> 'processing' | 'done' | 'error'
+let tcPollTimer = null;
+
+async function doTranscribe(recFile, cardIdx) {
+  const r = await api('POST', `/api/transcribe/${recFile}`);
+  if (r.error) { addLog('error', `Transcribe error: ${r.error}`); return; }
+  tcJobStatus[recFile] = 'processing';
+  const act = document.getElementById('cap-act-' + cardIdx);
+  if (act) {
+    const tscBtn = act.querySelector('.btn-cap-tsc');
+    if (tscBtn) {
+      tscBtn.disabled = true;
+      tscBtn.innerHTML = '<div class="spin" style="width:11px;height:11px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0;"></div>…';
+    }
+  }
+  pollTranscribeStatus(recFile);
+}
+
+function pollTranscribeStatus(recFile) {
+  if (tcPollTimer) clearInterval(tcPollTimer);
+  tcPollTimer = setInterval(async () => {
+    const r = await api('GET', `/api/transcribe/${recFile}/status`);
+    if (r.status === 'done') {
+      clearInterval(tcPollTimer); tcPollTimer = null;
+      tcJobStatus[recFile] = 'done';
+      loadHistory();
+      loadTranscripts();
+      loadTranscriptsCount();
+      addLog('info', `Transcription complete: ${recFile}`);
+    } else if (r.status === 'error') {
+      clearInterval(tcPollTimer); tcPollTimer = null;
+      tcJobStatus[recFile] = 'error';
+      loadHistory();
+      addLog('error', `Transcription failed: ${r.error || 'unknown error'}`);
+    }
+  }, 3000);
+}
+
+async function loadTranscripts() {
+  const r = await api('GET', '/api/transcripts');
+  const list = document.getElementById('tc-list');
+  if (!r.transcripts || !r.transcripts.length) {
+    list.innerHTML = '<div class="empty-state">No transcripts yet — hit 📝 Transcribe on a recording in the Captures tab</div>';
+    return;
+  }
+  list.innerHTML = r.transcripts.map(function(t, i) {
+    var dn = (t.recFilename || t.filename || '')
+      .replace(/\.wav$/i, '').replace(/\.json$/i, '')
+      .replace(/_\d{13}$/, '');
+    var cardId = 'tc-card-' + i;
+    var segs = (t.segments || []).map(function(s) {
+      return '<p><span class="tc-ts">' + fmtDur(s.startSec) + '</span>' + escHtml(s.text) + '</p>';
+    }).join('') || ('<p>' + escHtml(t.text || '') + '</p>');
+    return '<div class="tc-card" id="' + cardId + '">' +
+      '<div class="tc-header" onclick="document.getElementById(\'' + cardId + '\').classList.toggle(\'open\')">' +
+        '<div class="tc-icon">📝</div>' +
+        '<div class="tc-info">' +
+          '<div class="tc-name">' + dn + '</div>' +
+          '<div class="tc-meta">' + fmtDate(t.generatedAt) + ' · ' + fmtDur(t.duration) + ' · ' + (t.model || 'whisper-small.en') + ' · ' + t.wordCount + ' words</div>' +
+        '</div>' +
+        '<div class="tc-acts">' +
+          '<a href="/api/transcripts/' + t.filename + '/text" download class="btn btn-outline btn-sm"' +
+            ' style="text-decoration:none;font-size:11px;" onclick="event.stopPropagation()">↓ TXT</a>' +
+          '<button class="btn btn-ghost btn-sm" style="color:var(--red);"' +
+            ' onclick="event.stopPropagation();deleteTranscript(\'' + t.filename + '\')">✕</button>' +
+        '</div>' +
+        '<div class="tc-chev">▼</div>' +
+      '</div>' +
+      '<div class="tc-body">' +
+        '<div class="tc-text">' + segs + '</div>' +
+        '<div class="tc-footer">' +
+          '<div class="tc-stats">' + (t.model || 'whisper-small.en') + ' · ' + fmtDur(t.duration) + ' · ' + t.wordCount + ' words</div>' +
+          '<button class="btn btn-outline btn-sm" onclick="navigator.clipboard&&navigator.clipboard.writeText(\'' + (t.text||'').replace(/'/g,"\\'") + '\')">Copy</button>' +
+          '<a href="/api/transcripts/' + t.filename + '/text" download class="btn btn-outline btn-sm" style="text-decoration:none;">↓ TXT</a>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function loadTranscriptsCount() {
+  const r = await api('GET', '/api/transcripts');
+  const count = r.transcripts?.length || 0;
+  const badge = document.getElementById('tc-tab-count');
+  if (badge) { badge.textContent = count; badge.style.display = count > 0 ? 'inline-flex' : 'none'; }
+}
+
+async function deleteTranscript(filename) {
+  await api('DELETE', `/api/transcripts/${filename}`);
+  loadTranscripts();
+  loadTranscriptsCount();
+}
+
+function fmtDur(s) {
+  if (!s) return '0:00';
+  s = Math.round(s);
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+}
+
+function stripSip(val) {
+  if (!val || val === '—') return val;
+  return val.replace(/^sip:/i, '');
+}
+
+function escHtml(str) {
+  return (str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─── Call history helpers ────────────────────────────────────────────────────
+// Simple audio player for history entries (no card index needed)
+let _histAudio = null;
+let _histCallId = null;
+
+function histPlayToggle(callId, audioUrl) {
+  const btn      = document.getElementById('hist-play-' + callId);
+  const playerEl = document.getElementById('hist-player-' + callId);
+  if (_histCallId === callId && _histAudio) {
+    if (_histAudio.paused) {
+      _histAudio.play();
+      if (btn) btn.textContent = '⏸';
+      if (playerEl) playerEl.querySelectorAll('.pwv-bar').forEach(function(b){ b.style.animationPlayState='running'; });
+    } else {
+      _histAudio.pause();
+      if (btn) btn.textContent = '▶';
+      if (playerEl) playerEl.querySelectorAll('.pwv-bar').forEach(function(b){ b.style.animationPlayState='paused'; });
+    }
+    return;
+  }
+  if (_histAudio) { _histAudio.pause(); _histAudio.src = ''; _histAudio = null; }
+  if (_histCallId) {
+    const prev = document.getElementById('hist-player-' + _histCallId);
+    if (prev) prev.style.display = 'none';
+    const prevBtn = document.getElementById('hist-play-' + _histCallId);
+    if (prevBtn) prevBtn.textContent = '▶';
+  }
+  _histAudio  = new Audio(audioUrl);
+  _histCallId = callId;
+  _histAudio.volume = 0.8;
+  if (playerEl) {
+    playerEl.style.display = '';
+    playerEl.innerHTML =
+      '<div class="audio-player" style="margin-top:8px;">' +
+        '<div class="player-top">' +
+          '<div class="player-label"><div class="player-dot"></div>Playing</div>' +
+          '<div class="player-waveform" id="hist-wave-' + callId + '">' +
+            [8,14,20,10,18,6,16].map(function(h){return '<div class="pwv-bar active" style="height:'+h+'px;"></div>';}).join('') +
+          '</div>' +
+        '</div>' +
+        '<div class="progress-wrap" id="hist-prog-wrap-' + callId + '" onclick="_histSeek(event,&apos;' + callId + '&apos;)">' +
+          '<div class="progress-fill" id="hist-prog-' + callId + '" style="width:0%;"></div>' +
+          '<div class="progress-thumb" id="hist-thumb-' + callId + '" style="left:0%;"></div>' +
+        '</div>' +
+        '<div class="player-controls">' +
+          '<button class="ctrl-btn" onclick="_histSkip(&apos;' + callId + '&apos;,-10)">⏮</button>' +
+          '<button class="ctrl-btn paused" id="hist-pp-' + callId + '" onclick="histPlayToggle(&apos;' + callId + '&apos;,&apos;' + audioUrl + '&apos;)">⏸</button>' +
+          '<button class="ctrl-btn" onclick="_histSkip(&apos;' + callId + '&apos;,10)">⏭</button>' +'</div>';
+  }
+  if (btn) btn.textContent = '⏸';
+  _histAudio.addEventListener('timeupdate', function() { _histUpdateProgress(callId); });
+  _histAudio.addEventListener('ended', function() {
+    _histCallId = null; _histAudio = null;
+    if (btn) btn.textContent = '▶';
+    if (playerEl) playerEl.style.display = 'none';
+  });
+  _histAudio.play().catch(function(e) { addLog('warn', 'Playback error: ' + e.message); });
+}
+
+function _histUpdateProgress(callId) {
+  if (!_histAudio || _histCallId !== callId) return;
+  const pct   = _histAudio.duration ? (_histAudio.currentTime / _histAudio.duration) * 100 : 0;
+  const fill  = document.getElementById('hist-prog-' + callId);
+  const thumb = document.getElementById('hist-thumb-' + callId);
+  const time  = document.getElementById('hist-time-' + callId);
+  if (fill)  fill.style.width = pct + '%';
+  if (thumb) thumb.style.left = pct + '%';
+  if (time)  time.textContent = _capFmt(_histAudio.currentTime) + ' / ' + _capFmt(_histAudio.duration||0);
+}
+
+function _histSeek(e, callId) {
+  if (!_histAudio || _histCallId !== callId) return;
+  const wrap = document.getElementById('hist-prog-wrap-' + callId);
+  _histAudio.currentTime = (e.offsetX / wrap.offsetWidth) * (_histAudio.duration || 0);
+}
+
+function _histSkip(callId, secs) {
+  if (!_histAudio || _histCallId !== callId) return;
+  _histAudio.currentTime = Math.max(0, Math.min(_histAudio.duration||0, _histAudio.currentTime + secs));
+}
+
+// ─── Call history helpers (continued) ────────────────────────────────────────
+const tcSegmentCache = {};  // callId -> rendered HTML
+
+async function loadTranscriptForCard(callId, transcriptFile) {
+  const id = callId.slice(0,8);
+  const el = document.getElementById('tc-text-' + id);
+  if (!el || tcSegmentCache[callId]) return;
+  try {
+    const jsonFile = transcriptFile.replace(/\.wav$/i, '.json');
+    const r = await fetch('/captures/' + jsonFile);
+    const t = await r.json();
+    const html = (t.segments||[]).map(function(s) {
+      return '<p style="margin-bottom:6px;"><span style="font-family:var(--mono);font-size:10px;color:var(--violet);background:var(--violet-light);padding:1px 5px;border-radius:4px;margin-right:6px;">' + fmtDur(s.startSec) + '</span>' + escHtml(s.text) + '</p>';
+    }).join('') || '<p>' + escHtml(t.text||'') + '</p>';
+    tcSegmentCache[callId] = html;
+    if (el) el.innerHTML = html;
+    // Store full text for copy
+    el.dataset.text = t.text || '';
+  } catch(e) {
+    if (el) el.innerHTML = '<span style="color:var(--text-dim);font-size:11px;">Could not load transcript</span>';
+  }
+}
+
+function copyTranscript(callId) {
+  const id = callId.slice(0,8);
+  const el = document.getElementById('tc-text-' + id);
+  if (el && navigator.clipboard) navigator.clipboard.writeText(el.dataset.text || el.innerText);
+}
+
+async function deleteCallEntry(callId) {
+  await api('DELETE', '/api/history/' + callId);
+  delete tcSegmentCache[callId];
+  loadHistory();
+}
+
+async function deleteCapture(callId) {
+  await api('DELETE', '/api/history/' + callId + '/capture');
+  loadHistory();
+}
+
+async function deleteTranscriptForCall(callId) {
+  await api('DELETE', '/api/history/' + callId + '/transcript');
+  delete tcSegmentCache[callId];
+  loadHistory();
+}
+
+async function doTranscribeFromHistory(audioFile, callId) {
+  if (!audioFile) return;
+  const r = await api('POST', '/api/transcribe/' + audioFile);
+  if (r.error) { addLog('error', 'Transcribe error: ' + r.error); return; }
+  tcJobStatus[audioFile] = 'processing';
+  addLog('info', 'Transcription started: ' + audioFile);
+  // Poll and reload history when done
+  const timer = setInterval(async function() {
+    const s = await api('GET', '/api/transcribe/' + audioFile + '/status');
+    if (s.status === 'done') {
+      clearInterval(timer);
+      tcJobStatus[audioFile] = 'done';
+      delete tcSegmentCache[callId];
+      loadHistory();
+      addLog('info', 'Transcription complete: ' + audioFile);
+    } else if (s.status === 'error') {
+      clearInterval(timer);
+      addLog('error', 'Transcription failed: ' + (s.error||'unknown'));
+    }
+  }, 3000);
+}
+
+// ─── In-browser WAV playback for captures ────────────────────────────────────
+let _capAudio    = null;   // current HTMLAudioElement
+let _capCardIdx  = null;   // index of currently playing card
+
+function capPlayToggle(idx, audioUrl) {
+  if (_capCardIdx === idx) {
+    // Already playing this one — toggle pause
+    if (_capAudio.paused) {
+      _capAudio.play();
+      _capSetPauseState(idx, false);
+    } else {
+      _capAudio.pause();
+      _capSetPauseState(idx, true);
+    }
+    return;
+  }
+  // Stop any current playback
+  if (_capAudio) _capStopAudio(_capCardIdx);
+  // Start new playback
+  _capAudio    = new Audio(audioUrl);
+  _capCardIdx  = idx;
+  _capAudio.volume = 0.8;
+
+  const card   = document.getElementById(`cap-card-${idx}`);
+  const player = document.getElementById(`cap-player-${idx}`);
+  const playBtn = card.querySelector('.capture-actions button[onclick*="capPlayToggle"]');
+
+  card.classList.add('playing');
+  playBtn.textContent = '■ Stop';
+  playBtn.style.color = 'var(--red)';
+  playBtn.style.borderColor = 'var(--red)';
+
+  // Build player UI
+  player.style.display = '';
+  player.innerHTML = `
+    <div class="audio-player">
+      <div class="player-top">
+        <div class="player-label"><div class="player-dot"></div>Playing recording</div>
+        <div class="player-waveform" id="cap-wave-${idx}">
+          ${[8,14,20,10,18,6,16].map(h => `<div class="pwv-bar active" style="height:${h}px;"></div>`).join('')}
+        </div>
+      </div>
+      <div class="progress-wrap" id="cap-prog-wrap-${idx}" onclick="_capSeek(event,${idx})">
+        <div class="progress-fill" id="cap-prog-${idx}" style="width:0%;"></div>
+        <div class="progress-thumb" id="cap-thumb-${idx}" style="left:0%;"></div>
+      </div>
+      <div class="player-controls">
+        <button class="ctrl-btn" onclick="_capSkip(${idx},-10)" title="Back 10s">⏮</button>
+        <button class="ctrl-btn paused" id="cap-pp-${idx}" onclick="capPlayToggle(${idx},'${audioUrl}')" title="Pause">⏸</button>
+        <button class="ctrl-btn" onclick="_capSkip(${idx},10)" title="Forward 10s">⏭</button>
+        <span class="player-time" id="cap-time-${idx}">0:00 / 0:00</span>
+        <div class="volume-wrap">
+          <span class="volume-icon">🔊</span>
+          <input type="range" class="volume-slider" min="0" max="100" value="80"
+            oninput="_capAudio && (_capAudio.volume = this.value/100)">
+        </div>
+      </div>
+    </div>`;
+
+  _capAudio.addEventListener('timeupdate', () => _capUpdateProgress(idx));
+  _capAudio.addEventListener('ended',      () => _capStopAudio(idx));
+  _capAudio.play().catch(e => addLog('warn', `Playback error: ${e.message}`));
+}
+
+function _capUpdateProgress(idx) {
+  if (!_capAudio || _capCardIdx !== idx) return;
+  const pct = _capAudio.duration
+    ? (_capAudio.currentTime / _capAudio.duration) * 100 : 0;
+  const fill  = document.getElementById(`cap-prog-${idx}`);
+  const thumb = document.getElementById(`cap-thumb-${idx}`);
+  const time  = document.getElementById(`cap-time-${idx}`);
+  if (fill)  fill.style.width = pct + '%';
+  if (thumb) thumb.style.left = pct + '%';
+  if (time)  time.textContent = `${_capFmt(_capAudio.currentTime)} / ${_capFmt(_capAudio.duration||0)}`;
+}
+
+function _capFmt(s) {
+  s = Math.round(s);
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+}
+
+function _capSeek(e, idx) {
+  if (!_capAudio || _capCardIdx !== idx) return;
+  const wrap = document.getElementById(`cap-prog-wrap-${idx}`);
+  _capAudio.currentTime = (e.offsetX / wrap.offsetWidth) * (_capAudio.duration || 0);
+}
+
+function _capSkip(idx, secs) {
+  if (!_capAudio || _capCardIdx !== idx) return;
+  _capAudio.currentTime = Math.max(0, Math.min(_capAudio.duration||0, _capAudio.currentTime + secs));
+}
+
+function _capSetPauseState(idx, paused) {
+  const pp   = document.getElementById(`cap-pp-${idx}`);
+  const wave = document.getElementById(`cap-wave-${idx}`);
+  if (pp) { pp.textContent = paused ? '▶' : '⏸'; pp.classList.toggle('paused', !paused); }
+  if (wave) wave.querySelectorAll('.pwv-bar').forEach(b =>
+    b.style.animationPlayState = paused ? 'paused' : 'running');
+}
+
+function _capStopAudio(idx) {
+  if (_capAudio) { _capAudio.pause(); _capAudio.src = ''; _capAudio = null; }
+  _capCardIdx = null;
+  const card   = document.getElementById(`cap-card-${idx}`);
+  const player = document.getElementById(`cap-player-${idx}`);
+  if (!card) return;
+  card.classList.remove('playing');
+  if (player) player.style.display = 'none';
+  const playBtn = card.querySelector('.capture-actions button[onclick*="capPlayToggle"]');
+  if (playBtn) {
+    playBtn.textContent = '▶ Play';
+    playBtn.style.color = 'var(--green)';
+    playBtn.style.borderColor = 'var(--green)';
+  }
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 applyTheme(localStorage.getItem('sip-theme') || 'light');
 connectWS();
 addLog('info','SIP Endpoint UI initialised');
+loadHistory();
+loadTranscriptsCount();
+
+// Size the centre scroll wrapper to fill space above the inline log
+function sizeCentreScroll() {
+  const panel  = document.getElementById('centre-scroll').parentElement;
+  const scroll = document.getElementById('centre-scroll');
+  const log    = document.getElementById('log-panel');
+  const logH   = log.offsetHeight;
+  const panelH = panel.clientHeight;
+  scroll.style.height = Math.max(0, panelH - logH) + 'px';
+  scroll.style.overflow = 'hidden auto';
+}
+sizeCentreScroll();
+window.addEventListener('resize', sizeCentreScroll);
 requestNotifPermission();
 document.getElementById('dial-target').addEventListener('keydown', e => { if(e.key==='Enter') doCall(); });
 </script>

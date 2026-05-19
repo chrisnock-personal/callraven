@@ -12,7 +12,8 @@ const execFileAsync = promisify(execFile);
 
 const sipManager     = require('./sipManager');
 const callHistory    = require('./callHistory');
-const captureManager = require('./captureManager');
+const captureManager    = require('./captureManager');
+const transcribeManager = require('./transcribeManager');
 
 const app    = express();
 const server = http.createServer(app);
@@ -39,7 +40,45 @@ const upload = multer({ storage, fileFilter: (req, file, cb) => {
 // ─── WebSocket hub ────────────────────────────────────────────────────────────
 const clients = new Set();
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const url = req.url || '/';
+
+  // ── Audio relay WebSocket (/audio) ──────────────────────────────────────────
+  if (url === '/audio') {
+    let active = true;
+    ws.binaryType = 'arraybuffer';
+
+    // Wire up onAudio callback to this client
+    const relay = (pt, pcm16) => {
+      if (!active || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        // Header: [pt:1][sampleRate:4 LE][pcm16...]
+        const sampleRate = (pt === 9) ? 16000 : 8000;
+        const buf = Buffer.alloc(5 + pcm16.length);
+        buf[0] = pt;
+        buf.writeUInt32LE(sampleRate, 1);
+        pcm16.copy(buf, 5);
+        ws.send(buf);
+      } catch(e) {}
+    };
+
+    // Register relay with active bridge
+    if (sipManager.rtpBridge) sipManager.rtpBridge.onAudio = relay;
+
+    // Also register for future calls
+    sipManager.on('callConnected', () => {
+      if (sipManager.rtpBridge) sipManager.rtpBridge.onAudio = relay;
+    });
+
+    ws.on('close', () => {
+      active = false;
+      if (sipManager.rtpBridge && sipManager.rtpBridge.onAudio === relay)
+        sipManager.rtpBridge.onAudio = null;
+    });
+    return;
+  }
+
+  // ── Control WebSocket (/) ───────────────────────────────────────────────────
   clients.add(ws);
   ws.on('close', () => clients.delete(ws));
   ws.send(JSON.stringify({ type: 'state', data: sipManager.getState() }));
@@ -285,10 +324,10 @@ app.get('/api/captures', (req, res) => {
       .filter(f => f.endsWith('.pcap') || f.endsWith('.pcapng'))
       .map(f => {
         const stat = fs.statSync(path.join(captureDir, f));
-        // Find matching audio file (same call ID prefix)
+        // Find matching on-demand recording (rec_ file with same call ID prefix)
         const prefix = f.match(/call_[^_]+_([a-f0-9]+)/)?.[1];
         const audio  = prefix
-          ? allFiles.find(a => a.startsWith(`audio_${prefix}`) && a.endsWith('.wav'))
+          ? allFiles.find(a => a.startsWith(`rec_${prefix}`) && a.endsWith('.wav'))
           : null;
         return {
           filename:    f,
@@ -329,9 +368,28 @@ app.post('/api/resume', async (req, res) => {
 
 // ── Call History ──────────────────────────────────────────────────────────────
 
-/** GET /api/history — full call history as JSON */
+/** GET /api/history — full call history with capture info joined by callId */
 app.get('/api/history', (req, res) => {
-  res.json({ history: callHistory.getAll() });
+  try {
+    const history = callHistory.getAll();
+    const captureDir = path.join(__dirname, '../captures');
+    const allFiles = fs.readdirSync(captureDir);
+    // Enrich each history entry with capture/audio/transcript availability
+    const enriched = history.map(h => {
+      const id = h.callId ? h.callId.slice(0, 8) : null;
+      const pcap  = id ? allFiles.find(f => f.includes(id) && (f.endsWith('.pcap') || f.endsWith('.pcapng'))) : null;
+      const audio = id ? allFiles.find(f => f.startsWith('rec_' + id) && f.endsWith('.wav')) : null;
+      const tsc   = id ? allFiles.find(f => f.startsWith('rec_' + id) && f.endsWith('.json')) : null;
+      return {
+        ...h,
+        captureFile:   pcap  ? `/captures/${pcap}`  : (h.captureFile || null),
+        audioFile:     audio || null,
+        audioUrl:      audio ? `/captures/${audio}` : null,
+        transcriptFile: tsc  || null,
+      };
+    });
+    res.json({ history: enriched });
+  } catch (err) { res.json({ history: callHistory.getAll() }); }
 });
 
 /** GET /api/history/export — download as CSV */
@@ -344,6 +402,40 @@ app.get('/api/history/export', (req, res) => {
 /** DELETE /api/history — clear all history */
 app.delete('/api/history', (req, res) => {
   callHistory.clear();
+  res.json({ success: true });
+});
+
+/** DELETE /api/history/:callId — delete single call entry + its files */
+app.delete('/api/history/:callId', (req, res) => {
+  const { callId } = req.params;
+  const captureDir = path.join(__dirname, '../captures');
+  const allFiles   = fs.readdirSync(captureDir);
+  const id         = callId.slice(0, 8);
+  // Delete pcap, wav recording, and transcript
+  allFiles.filter(f => f.includes(id)).forEach(f => {
+    try { fs.unlinkSync(path.join(captureDir, f)); } catch(e) {}
+  });
+  callHistory.deleteEntry(callId);
+  res.json({ success: true });
+});
+
+/** DELETE /api/history/:callId/capture — delete only pcap + wav, keep history entry */
+app.delete('/api/history/:callId/capture', (req, res) => {
+  const id = req.params.callId.slice(0, 8);
+  const captureDir = path.join(__dirname, '../captures');
+  fs.readdirSync(captureDir)
+    .filter(f => f.includes(id) && (f.endsWith('.pcap') || f.endsWith('.wav')))
+    .forEach(f => { try { fs.unlinkSync(path.join(captureDir, f)); } catch(e) {} });
+  res.json({ success: true });
+});
+
+/** DELETE /api/history/:callId/transcript — delete only transcript json */
+app.delete('/api/history/:callId/transcript', (req, res) => {
+  const id = req.params.callId.slice(0, 8);
+  const captureDir = path.join(__dirname, '../captures');
+  fs.readdirSync(captureDir)
+    .filter(f => f.startsWith('rec_' + id) && f.endsWith('.json'))
+    .forEach(f => { try { fs.unlinkSync(path.join(captureDir, f)); } catch(e) {} });
   res.json({ success: true });
 });
 
@@ -378,6 +470,61 @@ app.post('/api/record/start', async (req, res) => {
 app.post('/api/record/stop', async (req, res) => {
   try { const r = await sipManager.stopRecording(); res.json({ success: true, ...r }); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Transcription ────────────────────────────────────────────────────────────
+
+/** GET /api/transcripts */
+app.get('/api/transcripts', (req, res) => {
+  res.json({ transcripts: transcribeManager.listTranscripts() });
+});
+
+/** POST /api/transcribe/:filename */
+app.post('/api/transcribe/:filename', async (req, res) => {
+  const { filename } = req.params;
+  if (!filename.startsWith('rec_') || !filename.endsWith('.wav'))
+    return res.status(400).json({ error: 'Only rec_*.wav recordings can be transcribed' });
+  if (!transcribeManager.isWhisperAvailable())
+    return res.status(503).json({ error: 'Whisper not available — rebuild image with Whisper support' });
+  try {
+    const result = await transcribeManager.startTranscription(filename);
+    res.json({ success: true, ...result });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/** GET /api/transcribe/:filename/status */
+app.get('/api/transcribe/:filename/status', (req, res) => {
+  const job = transcribeManager.getJobStatus(req.params.filename);
+  if (!job) return res.status(404).json({ error: 'No job found' });
+  res.json(job);
+});
+
+/** DELETE /api/transcripts/:filename */
+app.delete('/api/transcripts/:filename', (req, res) => {
+  try {
+    // Accept both rec_xxx.json and rec_xxx.wav
+    const jsonName = req.params.filename.replace(/\.wav$/i, '.json');
+    transcribeManager.deleteTranscript(jsonName);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/** GET /api/transcripts/:filename/text — download as plain text */
+app.get('/api/transcripts/:filename/text', (req, res) => {
+  // Accept both rec_xxx.json and rec_xxx.wav as the filename param
+  const jsonName = req.params.filename.replace(/\.wav$/i, '.json');
+  const p = path.join('/captures', jsonName);
+  if (!fs.existsSync(p)) return res.status(404).json({ error: 'Not found: ' + jsonName });
+  try {
+    const t = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const lines = (t.segments || []).map(s =>
+      '[' + transcribeManager.fmtTime(s.startSec) + '] ' + s.text.trim()
+    ).join('\n') || t.text || '';
+    const txtName = jsonName.replace(/\.json$/i, '.txt');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + txtName + '"');
+    res.send(lines);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
