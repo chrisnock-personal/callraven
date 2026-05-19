@@ -345,27 +345,23 @@ class RtpBridge {
           this.ssrc      = ssrc;
         }
 
-        // Audio relay to browser
-        if (this.onAudio && !this.playing && !this.held) {
+        // Audio relay to browser — always relay so Listen works during playback too
+        if (this.onAudio && !this.held) {
           this._relayAudio(pt, msg.slice(12));
+        }
+
+        // On-demand recording — write inbound audio regardless of playback state
+        if (this.recording && this.audioWriter) {
+          this.audioWriter.write(pt, msg.slice(12));
         }
       }
 
-      // During WAV playback or hold, suppress forwarding
+      // During WAV playback or hold, suppress forwarding inbound RTP to remote
       if (this.playing || this.held) return;
 
       this.socket.send(msg, this.remotePort, this.remoteIp);
       this.stats.txPackets++;
       this.stats.txBytes += msg.length;
-      // Note: we don't write the forwarded copy to avoid duplicate packets in pcap.
-      // The inbound packet is already captured above (rinfo → localPort).
-
-      // On-demand recording: only write when recording flag is set
-      if (this.recording && this.audioWriter && msg.length > 12) {
-        const pt      = msg[1] & 0x7f;
-        const payload = msg.slice(12);
-        this.audioWriter.write(pt, payload);
-      }
     });
     this.socket.on('error', (err) => console.error(`[RTP] ${err.message}`));
     this.socket.bind(this.localPort, () => {
@@ -918,7 +914,11 @@ class SipManager extends EventEmitter {
           }
         } catch(ex) { this._log('warn', `BYE capture error: ${ex.message}`); }
       }
-      if (callId) callHistory.endCall(callId, { status: 'completed' });
+      if (callId) {
+        const capFile = this.activeCall?.captureFile || null;
+        const st      = this.rtpBridge ? this.rtpBridge.getStats() : null;
+        callHistory.endCall(callId, { status: 'completed', captureFile: capFile, stats: st });
+      }
       this._teardown();
       this.emit('callEnded', { callId, cause: e.cause });
     });
@@ -937,7 +937,7 @@ class SipManager extends EventEmitter {
           }
         } catch(ex) { /* ignore */ }
       }
-      if (callId) callHistory.failCall(callId);
+      if (callId) callHistory.failCall(callId, { cause: e.cause || null });
       this._teardown();
       this.emit('callFailed', { callId, cause: e.cause });
     });
@@ -956,20 +956,12 @@ class SipManager extends EventEmitter {
     const callId    = this.activeCall?.callId;
     this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId);
 
-    // Start audio recording for inbound RTP
-    if (callId) {
-      const audioPath = require('path').join(__dirname, '../captures',
-        `audio_${callId.slice(0,8)}.wav`);
-      this.rtpBridge.audioWriter = new AudioWriter(audioPath);
-      this._log('info', `Audio recording started: ${require('path').basename(audioPath)}`);
-    }
-
     this.rtpBridge.start();
   }
 
   _teardown() {
     if (this.rtpBridge) {
-      // Finalise audio recording only if it was active
+      // Close on-demand recording writer if still active
       if (this.rtpBridge.recording && this.rtpBridge.audioWriter) {
         try {
           const info = this.rtpBridge.audioWriter.close();
@@ -1027,7 +1019,8 @@ class SipManager extends EventEmitter {
         });
         this._pendingCallId = callId;
         this.activeCall = { callId, target: targetUri, direction: 'outbound', startTime: null, status: 'calling', localRtpPort: rtpPort, localIp };
-        callHistory.addCall({ callId, direction: 'outbound', target: targetUri });
+        const localUri = this.config ? `${this.config.username}@${this.config.server}` : null;
+        callHistory.addCall({ callId, direction: 'outbound', target: targetUri, from: localUri, to: targetUri });
         resolve({ target: targetUri, callId, status: 'calling' });
       } catch (err) { reject(err); }
     });
@@ -1052,7 +1045,8 @@ class SipManager extends EventEmitter {
         session.answer({ mediaConstraints: { audio: false, video: false }, pcConfig: { iceServers: [] } });
         if (remoteSdp) this._startRtp(remoteSdp);
         else this._log('warn', 'No INVITE SDP — RTP not started');
-        callHistory.addCall({ callId, direction: 'inbound', from, displayName });
+        const localUri2 = this.config ? `${this.config.username}@${this.config.server}` : null;
+        callHistory.addCall({ callId, direction: 'inbound', target: from, from, to: localUri2, displayName });
         resolve({ callId, from, displayName });
       } catch (err) { this._log('error', `answer() error: ${err.message}`); this._teardown(); reject(err); }
     });
