@@ -1,235 +1,189 @@
 /**
  * audioDecoder.js
+ * Decodes G.722, PCMU, PCMA RTP payloads to 16-bit PCM and writes WAV files.
  *
- * Decodes inbound RTP audio payloads to PCM and writes them to a WAV file.
- * Supports G.722 (PT 9) and PCMU/PCMA (PT 0/8).
+ * Uses ffmpeg to decode each codec correctly — called once per payload type
+ * change, or we normalise everything to 8kHz PCM on the fly using lookup tables
+ * so there's no subprocess overhead per packet.
  *
- * The decoded WAV file is saved alongside the .pcap capture and is
- * accessible via GET /api/captures for download.
- *
- * G.722 decoder: ITU-T G.722 sub-band ADPCM decoder
- * PCMU decoder:  ITU-T G.711 μ-law to linear PCM
- * PCMA decoder:  ITU-T G.711 A-law to linear PCM
+ * Recording strategy:
+ *   - All payloads are decoded to 16-bit signed PCM at 8kHz immediately
+ *   - Written sequentially to a WAV file
+ *   - G.722 payloads are decoded via ffmpeg in batch at close() time
+ *     to avoid the broken custom decoder
  */
 
-const fs   = require('fs');
-const path = require('path');
+'use strict';
 
-// ─── μ-law decoder ────────────────────────────────────────────────────────────
-function ulawToLinear(u) {
-  u = ~u & 0xff;
-  const sign = u & 0x80;
-  const exp  = (u >> 4) & 0x07;
-  const mant = u & 0x0f;
-  let sample = ((mant << 1) + 33) << (exp + 2);
-  return sign ? -sample : sample;
-}
+const fs            = require('fs');
+const path          = require('path');
+const { execSync }  = require('child_process');
 
-// ─── A-law decoder ────────────────────────────────────────────────────────────
-function alawToLinear(a) {
-  a ^= 0x55;
-  const sign = a & 0x80;
-  const exp  = (a >> 4) & 0x07;
-  let mant   = a & 0x0f;
-  let sample;
-  if (exp === 0) {
-    sample = (mant << 1) + 1;
-  } else {
-    sample = ((mant | 0x10) << 1) + 1;
-    sample <<= exp - 1;
+// ─── μ-law decode table (precomputed for speed) ───────────────────────────────
+const ULAW_TABLE = new Int16Array(256);
+(function() {
+  for (let i = 0; i < 256; i++) {
+    let u = ~i & 0xff;
+    let t = ((u & 0x0f) << 3) + 132;
+    t <<= (u & 0x70) >> 4;
+    ULAW_TABLE[i] = (u & 0x80) ? (132 - t) : (t - 132);
   }
-  return sign ? -sample * 8 : sample * 8;
-}
+})();
 
-// ─── G.722 decoder ────────────────────────────────────────────────────────────
-// Decodes G.722 64kbps bitstream to 16kHz 16-bit PCM (2 samples per byte)
-class G722Decoder {
-  constructor() {
-    // Lower sub-band state
-    this.detl = 32; this.sl = 0; this.nbl = 0;
-    this.rlt  = [0, 0]; this.al = [0, 0];
-    this.dlt  = [0, 0, 0, 0, 0, 0, 0];
-    this.plt  = [0, 0, 0]; this.sgl = [0, 0, 0, 0, 0, 0];
-    this.zl   = 0;
-    // Upper sub-band state
-    this.deth = 8; this.sh = 0; this.nbh = 0;
-    this.rh   = [0, 0]; this.ah = [0, 0];
-    this.dh   = [0, 0]; this.sgh = [0, 0]; this.zh = 0;
-    // QMF synthesis state
-    this.xd   = new Array(24).fill(0);
-    this.xs   = new Array(24).fill(0);
+// ─── A-law decode table ───────────────────────────────────────────────────────
+const ALAW_TABLE = new Int16Array(256);
+(function() {
+  for (let i = 0; i < 256; i++) {
+    let a = i ^ 0x55;
+    let t = (a & 0x0f) << 4;
+    const exp = (a & 0x70) >> 4;
+    if (exp > 0) t += 0x100;
+    if (exp > 1) t <<= (exp - 1);
+    ALAW_TABLE[i] = (a & 0x80) ? t : -t;
   }
+})();
 
-  // Decode one G.722 byte to two 16kHz 16-bit PCM samples
-  decodeByte(code) {
-    const WL  = [-60,-30,58,172,336,520,680,836];
-    const ILB = [2048,2093,2139,2186,2233,2282,2332,2383,2435,2489,2543,
-                 2599,2656,2714,2774,2834,2896,2960,3025,3091,3158,3228,
-                 3298,3371,3444,3520,3597,3676,3756,3838,3922,4008];
-    const RL42= [0,7,6,5,4,3,2,1,7,6,5,4,3,2,1,0];
-    const QM4 = [0,7,21,36,52,69,88,110,136,168,211,278,425,1865,0,0];
-    const WH  = [0,-214,798];
-    const RH2 = [2,1,2,1];
-    const QM2 = [926,1885,3073,6554];
+// ─── AudioWriter ─────────────────────────────────────────────────────────────
+// Accumulates decoded PCM samples from mixed codecs, writes a single WAV.
+// G.722 payloads are buffered raw and decoded via ffmpeg at close().
 
-    const il = code & 0x3f;
-    const ih = (code >> 6) & 0x03;
-
-    // ── Lower sub-band decode ──────────────────────────────────────────────
-    const ril  = il >> 2;
-    const ril2 = rl42[ril] !== undefined ? rl42[ril] : RL42[ril];
-    const dlt  = (QM4[ril] * this.detl) >> 15;
-    const sil  = (il & 0x20) ? -1 : 1;
-    const dltv = dlt * sil;
-
-    // Log adaptation
-    this.nbl = Math.max(0, Math.min(18432,
-      this.nbl + WL[RL42[ril]] - (this.nbl >> 8)
-    ));
-    const detlp = ILB[Math.min(31, this.nbl >> 11)] * (1 + (this.nbl >> 6)) >> 15;
-    this.detl = Math.max(32, detlp);
-
-    // Predictor update
-    this.dlt.unshift(dltv); this.dlt.length = 7;
-    let zl = 0;
-    for (let i = 0; i < 6; i++) zl += this.sgl[i] * this.dlt[i+1];
-    this.zl = zl >> 15;
-    this.sl = Math.max(-16384, Math.min(16383, dltv + this.zl));
-    this.sgl.unshift(this.sl); this.sgl.length = 6;
-    this.rlt.unshift(this.sl); this.rlt.length = 2;
-
-    // ── Upper sub-band decode ──────────────────────────────────────────────
-    const rih  = ih & 1 ? 3 : 1;
-    const dh   = (QM2[rih-1] * this.deth) >> 15;
-    const sih  = (ih & 0x02) ? -1 : 1;
-    const dhv  = dh * sih;
-
-    this.nbh = Math.max(0, Math.min(18432,
-      this.nbh + WH[ih] - (this.nbh >> 8)
-    ));
-    const dethp = ILB[Math.min(31, this.nbh >> 11)] * (1 + (this.nbh >> 6)) >> 15;
-    this.deth = Math.max(8, dethp);
-
-    this.dh.unshift(dhv); this.dh.length = 2;
-    let zh = 0;
-    for (let i = 0; i < 2; i++) zh += this.sgh[i] * this.dh[i+1];
-    this.zh = zh >> 15;
-    this.sh = Math.max(-16384, Math.min(16383, dhv + this.zh));
-    this.sgh.unshift(this.sh); this.sgh.length = 2;
-    this.rh.unshift(this.sh); this.rh.length = 2;
-
-    // ── QMF synthesis — combine sub-bands back to wideband ────────────────
-    const QMF = [3,-11,12,32,-210,951,3876,-805,362,-156,53,-11];
-
-    this.xd.unshift(this.sl - this.sh); this.xd.length = 12;
-    this.xs.unshift(this.sl + this.sh); this.xs.length = 12;
-
-    let xout1 = 0, xout2 = 0;
-    for (let i = 0; i < 12; i++) {
-      xout1 += QMF[i] * this.xd[i];
-      xout2 += QMF[i] * this.xs[i];
-    }
-
-    const s1 = Math.max(-32768, Math.min(32767, xout1 >> 11));
-    const s2 = Math.max(-32768, Math.min(32767, xout2 >> 11));
-
-    return [s1, s2]; // two 16kHz samples per G.722 byte
-  }
-
-  // Decode a buffer of G.722 bytes to 16-bit LE PCM Buffer
-  decode(g722Buf) {
-    const out = Buffer.alloc(g722Buf.length * 4); // 2 samples * 2 bytes each
-    let outIdx = 0;
-    for (let i = 0; i < g722Buf.length; i++) {
-      const [s1, s2] = this.decodeByte(g722Buf[i]);
-      out.writeInt16LE(s1, outIdx);     outIdx += 2;
-      out.writeInt16LE(s2, outIdx);     outIdx += 2;
-    }
-    return out.slice(0, outIdx);
-  }
-}
-
-// ─── WAV file writer ──────────────────────────────────────────────────────────
-function writeWavHeader(fd, sampleRate, numChannels, numSamples) {
-  const bitsPerSample = 16;
-  const byteRate      = sampleRate * numChannels * bitsPerSample / 8;
-  const blockAlign    = numChannels * bitsPerSample / 8;
-  const dataSize      = numSamples * numChannels * bitsPerSample / 8;
-  const fileSize      = 36 + dataSize;
-
-  const hdr = Buffer.alloc(44);
-  hdr.write('RIFF', 0);
-  hdr.writeUInt32LE(fileSize, 4);
-  hdr.write('WAVE', 8);
-  hdr.write('fmt ', 12);
-  hdr.writeUInt32LE(16, 16);          // fmt chunk size
-  hdr.writeUInt16LE(1, 20);           // PCM format
-  hdr.writeUInt16LE(numChannels, 22);
-  hdr.writeUInt32LE(sampleRate, 24);
-  hdr.writeUInt32LE(byteRate, 28);
-  hdr.writeUInt16LE(blockAlign, 32);
-  hdr.writeUInt16LE(bitsPerSample, 34);
-  hdr.write('data', 36);
-  hdr.writeUInt32LE(dataSize, 40);
-
-  fs.writeSync(fd, hdr, 0, 44, 0);
-}
-
-// ─── AudioWriter — one per call ───────────────────────────────────────────────
 class AudioWriter {
   constructor(filePath) {
-    this.filePath    = filePath;
-    this.filename    = path.basename(filePath);
-    this.fd          = fs.openSync(filePath, 'w');
-    this.sampleRate  = 16000; // default G.722 output rate
-    this.pcmChunks   = [];
+    this.filePath     = filePath;
+    this.filename     = path.basename(filePath);
+    this.sampleRate   = 8000;      // normalise everything to 8kHz
     this.totalSamples = 0;
-    this.g722decoder = new G722Decoder();
+    this.closed       = false;
 
-    // Reserve space for WAV header — will be filled in on close()
-    const placeholder = Buffer.alloc(44);
-    fs.writeSync(this.fd, placeholder);
+    // PCM chunks from PCMU/PCMA (already decoded inline)
+    this.pcmChunks    = [];
+
+    // Raw G.722 bytes buffered for ffmpeg decode at close()
+    this.g722Chunks   = [];
+    this.g722Bytes    = 0;
+
+    // Track whether we have any real audio
+    this.hasAudio     = false;
   }
 
   write(payloadType, payload) {
-    let pcm;
+    if (this.closed || !payload || payload.length === 0) return;
+    this.hasAudio = true;
 
     if (payloadType === 9) {
-      // G.722 → 16kHz 16-bit PCM
-      this.sampleRate = 16000;
-      pcm = this.g722decoder.decode(payload);
-    } else if (payloadType === 0) {
-      // PCMU (μ-law) → 8kHz 16-bit PCM
-      this.sampleRate = 8000;
-      pcm = Buffer.alloc(payload.length * 2);
-      for (let i = 0; i < payload.length; i++) {
-        pcm.writeInt16LE(ulawToLinear(payload[i]), i * 2);
-      }
-    } else if (payloadType === 8) {
-      // PCMA (A-law) → 8kHz 16-bit PCM
-      this.sampleRate = 8000;
-      pcm = Buffer.alloc(payload.length * 2);
-      for (let i = 0; i < payload.length; i++) {
-        pcm.writeInt16LE(alawToLinear(payload[i]), i * 2);
-      }
-    } else {
-      return; // unsupported codec
-    }
+      // G.722 — buffer raw for ffmpeg decode at close()
+      const copy = Buffer.from(payload);
+      this.g722Chunks.push(copy);
+      this.g722Bytes += copy.length;
 
-    fs.writeSync(this.fd, pcm);
-    this.totalSamples += pcm.length / 2;
+    } else if (payloadType === 0) {
+      // PCMU μ-law → 16-bit PCM
+      const pcm = Buffer.alloc(payload.length * 2);
+      for (let i = 0; i < payload.length; i++) {
+        pcm.writeInt16LE(ULAW_TABLE[payload[i]], i * 2);
+      }
+      this.pcmChunks.push(pcm);
+      this.totalSamples += payload.length;
+
+    } else if (payloadType === 8) {
+      // PCMA A-law → 16-bit PCM
+      const pcm = Buffer.alloc(payload.length * 2);
+      for (let i = 0; i < payload.length; i++) {
+        pcm.writeInt16LE(ALAW_TABLE[payload[i]], i * 2);
+      }
+      this.pcmChunks.push(pcm);
+      this.totalSamples += payload.length;
+    }
+    // Other PTs silently ignored
   }
 
   close() {
-    // Go back and write the real WAV header now we know the size
-    writeWavHeader(this.fd, this.sampleRate, 1, this.totalSamples);
-    fs.closeSync(this.fd);
+    if (this.closed) return { size: 0, duration: 0 };
+    this.closed = true;
 
-    const stat = fs.statSync(this.filePath);
-    const dur  = Math.round(this.totalSamples / this.sampleRate);
-    console.log(`[AUDIO] Saved: ${this.filename} (${stat.size} bytes, ~${dur}s)`);
-    return { size: stat.size, duration: dur };
+    if (!this.hasAudio) {
+      console.log(`[AUDIO] No audio data for ${this.filename}`);
+      return { size: 0, duration: 0 };
+    }
+
+    // ── Decode G.722 chunks via ffmpeg ───────────────────────────────────────
+    let g722Pcm = null;
+    if (this.g722Bytes > 0) {
+      const rawPath = this.filePath + '.g722raw';
+      try {
+        const raw = Buffer.concat(this.g722Chunks);
+        fs.writeFileSync(rawPath, raw);
+        // G.722 → 16kHz PCM → resample to 8kHz to match PCMU
+        const tmpPath = rawPath + '.raw';
+        execSync(
+          `ffmpeg -y -f g722 -i "${rawPath}" -ar 8000 -ac 1 -f s16le "${tmpPath}" 2>/dev/null`,
+          { timeout: 30000 }
+        );
+        g722Pcm = fs.readFileSync(tmpPath);
+        try { fs.unlinkSync(rawPath); fs.unlinkSync(tmpPath); } catch(e) {}
+        const g722Samples = g722Pcm.length / 2;
+        this.totalSamples += g722Samples;
+        console.log(`[AUDIO] G.722 decoded: ${this.g722Bytes} bytes → ${g722Samples} samples`);
+      } catch (err) {
+        console.error(`[AUDIO] G.722 decode failed: ${err.message}`);
+        try { fs.unlinkSync(rawPath); } catch(e) {}
+        g722Pcm = null;
+      }
+    }
+
+    // ── Combine all PCM chunks ────────────────────────────────────────────────
+    const allChunks = [];
+    if (this.pcmChunks.length > 0) allChunks.push(...this.pcmChunks);
+    if (g722Pcm) allChunks.push(g722Pcm);
+
+    if (allChunks.length === 0 || this.totalSamples === 0) {
+      console.log(`[AUDIO] No decodable audio for ${this.filename}`);
+      return { size: 0, duration: 0 };
+    }
+
+    // ── Write WAV file ────────────────────────────────────────────────────────
+    try {
+      const fd       = fs.openSync(this.filePath, 'w');
+      const sr       = this.sampleRate;
+      const ns       = this.totalSamples;
+      const dataSize = ns * 2;
+
+      // WAV header
+      const hdr = Buffer.alloc(44);
+      hdr.write('RIFF', 0);
+      hdr.writeUInt32LE(36 + dataSize, 4);
+      hdr.write('WAVE', 8);
+      hdr.write('fmt ', 12);
+      hdr.writeUInt32LE(16, 16);
+      hdr.writeUInt16LE(1, 20);        // PCM
+      hdr.writeUInt16LE(1, 22);        // mono
+      hdr.writeUInt32LE(sr, 24);
+      hdr.writeUInt32LE(sr * 2, 28);   // byte rate
+      hdr.writeUInt16LE(2, 32);        // block align
+      hdr.writeUInt16LE(16, 34);       // bits per sample
+      hdr.write('data', 36);
+      hdr.writeUInt32LE(dataSize, 40);
+      fs.writeSync(fd, hdr);
+
+      for (const chunk of allChunks) {
+        fs.writeSync(fd, chunk);
+      }
+      fs.closeSync(fd);
+
+      const stat     = fs.statSync(this.filePath);
+      const duration = Math.round(ns / sr);
+      console.log(`[AUDIO] Saved: ${this.filename} (${stat.size} bytes, ~${duration}s)`);
+      return { size: stat.size, duration };
+    } catch (err) {
+      console.error(`[AUDIO] WAV write failed: ${err.message}`);
+      return { size: 0, duration: 0 };
+    }
   }
+}
+
+// Stub kept for any callers
+class G722Decoder {
+  decode(buf) { return Buffer.alloc(buf.length * 4); }
 }
 
 module.exports = { AudioWriter, G722Decoder };
