@@ -352,6 +352,10 @@ class RtpBridge {
 
         // On-demand recording — write inbound audio regardless of playback state
         if (this.recording && this.audioWriter) {
+          if (!this._loggedRecordPt) {
+            console.log('[REC] Recording inbound PT=' + pt + ' payload_len=' + (msg.length-12));
+            this._loggedRecordPt = true;
+          }
           this.audioWriter.write(pt, msg.slice(12));
         }
       }
@@ -465,6 +469,10 @@ class RtpBridge {
         offset += FRAME_BYTES;
         // Send as PT 9 (G.722) — timestamp increments by 160 per RFC 3551
         this.sendRtpG722(frame);
+        // Also write into recording so WAV playback is captured
+        if (this.recording && this.audioWriter) {
+          this.audioWriter.write(9, frame);
+        }
       } catch (e) {
         console.error(`[WAV] Frame error: ${e.message}`);
         this.stopPlayback();
@@ -554,6 +562,7 @@ class SipManager extends EventEmitter {
     this.ua           = null;
     this.session      = null;
     this.registered   = false;
+    this.autoAnswer   = { enabled: false, delayMs: 0 };  // configurable auto-answer
     this.incomingCall = null;
     this.activeCall   = null;
     this.config       = null;
@@ -578,6 +587,7 @@ class SipManager extends EventEmitter {
   getState() {
     return {
       registered: this.registered,
+      autoAnswer: this.autoAnswer,
       config: this.config ? {
         server:      this.config.server,
         username:    this.config.username,
@@ -887,6 +897,18 @@ class SipManager extends EventEmitter {
       };
       this._log('info', `Incoming call from ${this.incomingCall.from}`);
       this.emit('incomingCall', { from: this.incomingCall.from, displayName: this.incomingCall.displayName });
+
+      // Auto-answer if enabled
+      if (this.autoAnswer.enabled) {
+        const delay = this.autoAnswer.delayMs || 0;
+        this._log('info', `Auto-answer in ${delay}ms`);
+        setTimeout(() => {
+          if (this.incomingCall) {
+            const callId = require('uuid').v4();
+            this.answerCall(callId).catch(err => this._log('error', `Auto-answer failed: ${err.message}`));
+          }
+        }, delay);
+      }
     }
     session.on('progress', () => { this._log('info', 'Remote ringing'); if (this.activeCall) this.activeCall.status = 'ringing'; });
     session.on('confirmed', () => {
@@ -985,6 +1007,12 @@ class SipManager extends EventEmitter {
   }
 
   // ── Unregister ───────────────────────────────────────────────────────────
+  setAutoAnswer({ enabled = false, delayMs = 0 } = {}) {
+    this.autoAnswer = { enabled: !!enabled, delayMs: Math.max(0, parseInt(delayMs) || 0) };
+    this._log('info', `Auto-answer ${enabled ? `enabled (delay: ${delayMs}ms)` : 'disabled'}`);
+    return this.autoAnswer;
+  }
+
   unregister() {
     return new Promise((resolve) => {
       this._stopKeepalive();
