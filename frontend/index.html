@@ -1644,6 +1644,7 @@ function onIncomingCall(data) {
 
 function onCallConnected(data) {
   state.activeCall = { ...state.activeCall, status: 'connected' };
+  hideIncoming();
   startCallTimer();
   startStatsPolling();
   stopRingtone();

@@ -26,8 +26,8 @@ FRONTEND_ONLY=false
 BACKEND_ONLY=false
 SHOW_LOGS=false
 
-for arg in "$@"; do
-  case $arg in
+while [[ $# -gt 0 ]]; do
+  case $1 in
     --sync-only)     SYNC_ONLY=true ;;
     --rebuild-only)  REBUILD_ONLY=true ;;
     --frontend-only) FRONTEND_ONLY=true ;;
@@ -35,22 +35,26 @@ for arg in "$@"; do
     --logs)          SHOW_LOGS=true ;;
     --host)          shift; REMOTE_HOST="$1" ;;
     --help|-h)
-      echo "Usage: ./sync.sh [options]"
+      echo "Usage: ./sync.sh [user@host] [options]"
       echo ""
+      echo "  user@host          Remote host to deploy to (overrides \$SIP_REMOTE)"
       echo "  (no args)          Sync files + full podman rebuild + restart"
       echo "  --sync-only        Sync files only, skip rebuild"
       echo "  --frontend-only    Hot-push frontend/index.html into running container (fast)"
       echo "  --backend-only     Hot-push backend/*.js into running container + restart node"
       echo "  --rebuild-only     Full podman rebuild on remote without syncing first"
       echo "  --logs             Tail container logs after deploy"
-      echo "  --host user@ip     Override remote host (default: \$REMOTE_HOST)"
+      echo "  --host user@ip     Override remote host (alternative to positional arg)"
       echo ""
       echo "  Env vars:"
       echo "    SIP_REMOTE=user@host    change default remote (current: $REMOTE_HOST)"
       echo "    SIP_REMOTE_DIR=path     change remote path   (current: $REMOTE_DIR)"
       exit 0
       ;;
+    *@*)             REMOTE_HOST="$1" ;;
+    *)               echo "Unknown argument: $1"; exit 1 ;;
   esac
+  shift
 done
 
 echo "📡  SIP Endpoint Sync & Deploy"
