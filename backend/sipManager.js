@@ -79,7 +79,15 @@ function allocateRtpPort() {
 
 // ─── Local IP ────────────────────────────────────────────────────────────────
 function getLocalIp() {
+  if (process.env.MEDIA_IP) return process.env.MEDIA_IP;
   const ifaces = os.networkInterfaces();
+  // Prefer interfaces whose names suggest a LAN NIC over virtual bridges
+  const preferred = ['eth', 'en', 'wl', 'ens', 'enp', 'wlp'];
+  for (const prefix of preferred)
+    for (const name of Object.keys(ifaces).filter(n => n.startsWith(prefix)))
+      for (const iface of ifaces[name])
+        if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+  // Fallback: first non-loopback IPv4 (original behaviour)
   for (const name of Object.keys(ifaces))
     for (const iface of ifaces[name])
       if (iface.family === 'IPv4' && !iface.internal) return iface.address;
@@ -281,7 +289,9 @@ class RtpBridge {
       codec: null, startTime: null
     };
     // Audio relay: set to fn(pt, pcm16Buffer) to receive decoded inbound audio
-    this.onAudio  = null;
+    this.onAudio    = null;
+    // Raw payload relay: set to fn(pt, rawPayload) — fires before any decoding
+    this.onRawAudio = null;
     // On-demand recording flag (distinct from always-on audioWriter)
     this.recording = false;
     this._g722dec  = null;
@@ -348,6 +358,10 @@ class RtpBridge {
         // Audio relay to browser — always relay so Listen works during playback too
         if (this.onAudio && !this.held) {
           this._relayAudio(pt, msg.slice(12));
+        }
+        // Raw payload relay for live transcription (fires before any decoding)
+        if (this.onRawAudio && !this.held) {
+          this.onRawAudio(pt, msg.slice(12));
         }
 
         // On-demand recording — write inbound audio regardless of playback state
@@ -994,7 +1008,8 @@ class SipManager extends EventEmitter {
       }
       const stats = this.rtpBridge.getStats();
       this._log('info', `Call stats — codec:${stats.codec} rx:${stats.rxPackets}pkts tx:${stats.txPackets}pkts lost:${stats.lostPackets} jitter:${stats.jitterMs}ms`);
-      this.rtpBridge.onAudio = null;
+      this.rtpBridge.onAudio    = null;
+      this.rtpBridge.onRawAudio = null;
       this.rtpBridge.stop();
       this.rtpBridge = null;
     }
