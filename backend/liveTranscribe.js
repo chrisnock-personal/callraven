@@ -101,23 +101,27 @@ function runWhisper(wavPath) {
 class LiveTranscriber extends EventEmitter {
   constructor() {
     super();
-    this._g722   = []; // raw G.722 payload bytes
-    this._pcm    = []; // PCM16 buffers (from PCMU/PCMA inline decode)
-    this._pt     = null;
+    // Inbound (remote speaker) buffers
+    this._g722   = [];
+    this._pcm    = [];
+    // Outbound (local WAV playback) buffers
+    this._g722tx = [];
+    this._pcmtx  = [];
     this._busy   = false;
     this._timer  = null;
   }
 
   start() {
-    this._g722  = [];
-    this._pcm   = [];
-    this._busy  = false;
-    this._timer = setInterval(() => this._flush(), WINDOW_MS);
+    this._g722   = [];
+    this._pcm    = [];
+    this._g722tx = [];
+    this._pcmtx  = [];
+    this._busy   = false;
+    this._timer  = setInterval(() => this._flush(), WINDOW_MS);
   }
 
-  // Receives raw RTP payload (before any decoding) via onRawAudio hook
+  // Inbound: receives raw RTP payload via onRawAudio hook
   write(pt, rawPayload) {
-    this._pt = pt;
     if (pt === 9) {
       this._g722.push(Buffer.from(rawPayload));
     } else if (pt === 0 || pt === 8) {
@@ -129,56 +133,93 @@ class LiveTranscriber extends EventEmitter {
     }
   }
 
+  // Outbound: receives raw G.722 frames from WAV playback via onRawOutboundAudio hook
+  writeOutbound(pt, rawPayload) {
+    if (pt === 9) {
+      this._g722tx.push(Buffer.from(rawPayload));
+    } else if (pt === 0 || pt === 8) {
+      const tbl = pt === 0 ? ULAW_TABLE : ALAW_TABLE;
+      const pcm = Buffer.alloc(rawPayload.length * 2);
+      for (let i = 0; i < rawPayload.length; i++)
+        pcm.writeInt16LE(tbl[rawPayload[i]], i * 2);
+      this._pcmtx.push(pcm);
+    }
+  }
+
   stop() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
-    this._g722 = [];
-    this._pcm  = [];
+    this._g722 = []; this._pcm  = [];
+    this._g722tx = []; this._pcmtx = [];
   }
 
   async _flush() {
     if (this._busy) return;
 
-    const g722 = this._g722.splice(0);
-    const pcm  = this._pcm.splice(0);
+    // Drain all buffers atomically
+    const rxG722 = this._g722.splice(0);
+    const rxPcm  = this._pcm.splice(0);
+    const txG722 = this._g722tx.splice(0);
+    const txPcm  = this._pcmtx.splice(0);
 
-    const g722Bytes   = g722.reduce((n, b) => n + b.length, 0);
-    const pcmSamples  = pcm.reduce((n, b) => n + b.length, 0) / 2;
-    const useG722     = g722Bytes > 0;
-    const usePcm      = pcmSamples > 0;
+    const rxG722Bytes  = rxG722.reduce((n, b) => n + b.length, 0);
+    const rxPcmSamples = rxPcm.reduce((n, b) => n + b.length, 0) / 2;
+    const txG722Bytes  = txG722.reduce((n, b) => n + b.length, 0);
+    const txPcmSamples = txPcm.reduce((n, b) => n + b.length, 0) / 2;
 
-    if (!useG722 && !usePcm) return;
-    if (useG722  && g722Bytes  < MIN_G722_BYTES)  return;
-    if (!useG722 && pcmSamples < MIN_PCM_SAMPLES) return;
+    const hasRx = (rxG722Bytes >= MIN_G722_BYTES) || (rxPcmSamples >= MIN_PCM_SAMPLES && rxG722Bytes === 0);
+    const hasTx = (txG722Bytes >= MIN_G722_BYTES) || (txPcmSamples >= MIN_PCM_SAMPLES && txG722Bytes === 0);
+
+    if (!hasRx && !hasTx) return;
 
     this._busy = true;
-    const tag    = Date.now();
-    const tmpWav = path.join(os.tmpdir(), `lt_${tag}.wav`);
+    const tag  = Date.now();
 
     try {
-      if (useG722) {
-        // Write raw G.722 bytes → ffmpeg → 16kHz PCM WAV (same as AudioWriter)
-        const rawPath = path.join(os.tmpdir(), `lt_${tag}.g722raw`);
-        fs.writeFileSync(rawPath, Buffer.concat(g722));
-        await ffmpeg(['-y', '-f', 'g722', '-i', rawPath,
-                      '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmpWav]);
-        try { fs.unlinkSync(rawPath); } catch (_) {}
-      } else {
-        // Write 8kHz PCM WAV → resample to 16kHz
-        const pcm8kWav = path.join(os.tmpdir(), `lt_${tag}_8k.wav`);
-        writeWav(pcm8kWav, Buffer.concat(pcm), 8000);
-        await ffmpeg(['-y', '-i', pcm8kWav,
-                      '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmpWav]);
-        try { fs.unlinkSync(pcm8kWav); } catch (_) {}
+      const jobs = [];
+
+      if (hasRx) {
+        jobs.push(_decodeAndTranscribe(tag, 'rx', rxG722, rxPcm, rxG722Bytes)
+          .then(text => text ? { speaker: 'Remote', text } : null));
+      }
+      if (hasTx) {
+        jobs.push(_decodeAndTranscribe(tag, 'tx', txG722, txPcm, txG722Bytes)
+          .then(text => text ? { speaker: 'Local', text } : null));
       }
 
-      const text = await runWhisper(tmpWav);
-      if (text) this.emit('text', text);
+      const results = (await Promise.all(jobs)).filter(Boolean);
+      const diarized = results.some(r => r.speaker === 'Local');
+
+      for (const r of results) {
+        const line = diarized ? `[${r.speaker}] ${r.text}` : r.text;
+        this.emit('text', line);
+      }
     } catch (_) {
       // skip this window on any error
     } finally {
-      try { fs.unlinkSync(tmpWav); } catch (_) {}
       this._busy = false;
     }
+  }
+}
+
+async function _decodeAndTranscribe(tag, channel, g722Bufs, pcmBufs, g722Bytes) {
+  const tmpWav = path.join(os.tmpdir(), `lt_${tag}_${channel}.wav`);
+  try {
+    if (g722Bytes > 0) {
+      const rawPath = path.join(os.tmpdir(), `lt_${tag}_${channel}.g722raw`);
+      fs.writeFileSync(rawPath, Buffer.concat(g722Bufs));
+      await ffmpeg(['-y', '-f', 'g722', '-i', rawPath,
+                    '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmpWav]);
+      try { fs.unlinkSync(rawPath); } catch (_) {}
+    } else {
+      const pcm8kWav = path.join(os.tmpdir(), `lt_${tag}_${channel}_8k.wav`);
+      writeWav(pcm8kWav, Buffer.concat(pcmBufs), 8000);
+      await ffmpeg(['-y', '-i', pcm8kWav,
+                    '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmpWav]);
+      try { fs.unlinkSync(pcm8kWav); } catch (_) {}
+    }
+    return await runWhisper(tmpWav);
+  } finally {
+    try { fs.unlinkSync(tmpWav); } catch (_) {}
   }
 }
 

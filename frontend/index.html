@@ -586,6 +586,9 @@
     .ico-btn:hover::after { opacity: 1; }
 
     .capture-item.has-transcript { border-left: 3px solid var(--violet); }
+    .lt-speaker-remote { font-weight:600; color: var(--blue);   font-size:10px; padding:1px 5px; border-radius:4px; background:var(--blue-light,#eff6ff); margin-right:4px; }
+    .lt-speaker-local  { font-weight:600; color: var(--green);  font-size:10px; padding:1px 5px; border-radius:4px; background:var(--green-light,#f0fdf4); margin-right:4px; }
+    .lt-line { margin-bottom:4px; }
     .transcript-badge {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: 10px; font-weight: 600; color: var(--violet);
@@ -1485,6 +1488,15 @@
       <div id="wav-status"></div>
     </div>
 
+    <!-- Live Transcript -->
+    <div class="section" id="live-transcript-section" style="display:none;">
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+        Live Transcript
+        <button class="btn btn-outline btn-sm" onclick="clearLiveTranscript()" style="font-size:10px;padding:2px 7px;">Clear</button>
+      </div>
+      <div id="live-transcript-body" style="max-height:160px;overflow-y:auto;font-size:12px;line-height:1.6;color:var(--text-main);"></div>
+    </div>
+
     </div><!-- end scroll wrapper -->
 
     <!-- System Log — inline, flush below WAV, fills remaining height -->
@@ -1582,6 +1594,7 @@ function handleWSMessage({ type, data }) {
     case 'ipChanged':        addLog('warn',`IP changed: ${data.newIp}`); break;
     case 'recordingStarted': onRecordingStarted(data); break;
     case 'recordingStopped': onRecordingStopped(data); break;
+    case 'transcriptChunk': onTranscriptChunk(data); break;
   }
 }
 
@@ -1656,6 +1669,7 @@ function onCallConnected(data) {
   document.getElementById('btn-hangup').style.display = '';
   document.getElementById('call-status-label').textContent = 'Active Call';
   addLog('info','Call connected');
+  showLiveTranscript();
 }
 
 function onCallEnded(data) {
@@ -1670,6 +1684,7 @@ function onCallEnded(data) {
   setLabel('call-label','Idle');
   onConfEnded();
   addLog('info',`Call ended${data.cause ? ': '+data.cause : ''}`);
+  hideLiveTranscript();
   setTimeout(loadHistory, 1500);
 }
 
@@ -2441,8 +2456,44 @@ function onRecordingStopped(data) {
   document.getElementById('btn-record-start').style.display = '';
   document.getElementById('btn-record-stop').style.display  = 'none';
   document.getElementById('rec-indicator').classList.remove('active');
-  if (data?.audioFile) addLog('info', `Recording saved: ${data.audioFile}`);
+  if (data?.audioFile) addLog('info', `Recording saved: ${data.audioFile}${data.txFile ? ' + ' + data.txFile : ''}`);
   setTimeout(loadHistory, 800);
+}
+
+// ─── Live transcript panel ────────────────────────────────────────────────────
+function showLiveTranscript() {
+  const sec = document.getElementById('live-transcript-section');
+  if (sec) sec.style.display = '';
+}
+function hideLiveTranscript() {
+  const sec = document.getElementById('live-transcript-section');
+  if (sec) sec.style.display = 'none';
+}
+function clearLiveTranscript() {
+  const body = document.getElementById('live-transcript-body');
+  if (body) body.innerHTML = '';
+}
+function onTranscriptChunk(data) {
+  const body = document.getElementById('live-transcript-body');
+  if (!body) return;
+  const text = data.text || '';
+  const line = document.createElement('div');
+  line.className = 'lt-line';
+  // Parse optional [Remote] / [Local] speaker prefix
+  const m = text.match(/^\[(Remote|Local)\]\s*/);
+  if (m) {
+    const speaker = m[1];
+    const cls     = speaker === 'Local' ? 'lt-speaker-local' : 'lt-speaker-remote';
+    const label   = document.createElement('span');
+    label.className   = cls;
+    label.textContent = speaker;
+    line.appendChild(label);
+    line.appendChild(document.createTextNode(text.slice(m[0].length)));
+  } else {
+    line.textContent = text;
+  }
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
 }
 
 // ─── Transcription ───────────────────────────────────────────────────────────
@@ -2646,8 +2697,13 @@ async function loadTranscriptForCard(callId, transcriptFile) {
     const jsonFile = transcriptFile.replace(/\.wav$/i, '.json');
     const r = await fetch('/captures/' + jsonFile);
     const t = await r.json();
+    const diarized = !!t.diarized;
     const html = (t.segments||[]).map(function(s) {
-      return '<p style="margin-bottom:6px;"><span style="font-family:var(--mono);font-size:10px;color:var(--violet);background:var(--violet-light);padding:1px 5px;border-radius:4px;margin-right:6px;">' + fmtDur(s.startSec) + '</span>' + escHtml(s.text) + '</p>';
+      const ts = '<span style="font-family:var(--mono);font-size:10px;color:var(--violet);background:var(--violet-light);padding:1px 5px;border-radius:4px;margin-right:6px;">' + fmtDur(s.startSec) + '</span>';
+      const spk = diarized
+        ? '<span class="' + (s.speaker === 'Local' ? 'lt-speaker-local' : 'lt-speaker-remote') + '">' + escHtml(s.speaker||'Remote') + '</span>'
+        : '';
+      return '<p style="margin-bottom:6px;">' + ts + spk + escHtml(s.text) + '</p>';
     }).join('') || '<p>' + escHtml(t.text||'') + '</p>';
     tcSegmentCache[callId] = html;
     if (el) el.innerHTML = html;
