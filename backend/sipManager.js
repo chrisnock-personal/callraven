@@ -292,9 +292,13 @@ class RtpBridge {
     this.onAudio    = null;
     // Raw payload relay: set to fn(pt, rawPayload) — fires before any decoding
     this.onRawAudio = null;
+    // Raw outbound relay: fires with each G.722 frame sent during WAV playback
+    this.onRawOutboundAudio = null;
     // On-demand recording flag (distinct from always-on audioWriter)
-    this.recording = false;
-    this._g722dec  = null;
+    this.recording  = false;
+    this.audioWriter = null;  // inbound (remote) recorder
+    this.txWriter    = null;  // outbound (local WAV playback) recorder
+    this._g722dec   = null;
   }
 
   start() {
@@ -483,9 +487,13 @@ class RtpBridge {
         offset += FRAME_BYTES;
         // Send as PT 9 (G.722) — timestamp increments by 160 per RFC 3551
         this.sendRtpG722(frame);
-        // Also write into recording so WAV playback is captured
-        if (this.recording && this.audioWriter) {
-          this.audioWriter.write(9, frame);
+        // Write to outbound (tx) recorder — keeps playback separate from inbound
+        if (this.recording && this.txWriter) {
+          this.txWriter.write(9, frame);
+        }
+        // Raw outbound relay for live diarization
+        if (this.onRawOutboundAudio) {
+          this.onRawOutboundAudio(9, frame);
         }
       } catch (e) {
         console.error(`[WAV] Frame error: ${e.message}`);
@@ -997,14 +1005,23 @@ class SipManager extends EventEmitter {
 
   _teardown() {
     if (this.rtpBridge) {
-      // Close on-demand recording writer if still active
-      if (this.rtpBridge.recording && this.rtpBridge.audioWriter) {
-        try {
-          const info = this.rtpBridge.audioWriter.close();
-          this._log('info', `Recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
-        } catch (e) { this._log('warn', `Recording close error: ${e.message}`); }
-        this.rtpBridge.audioWriter = null;
-        this.rtpBridge.recording   = false;
+      // Close on-demand recording writers if still active
+      if (this.rtpBridge.recording) {
+        if (this.rtpBridge.audioWriter) {
+          try {
+            const info = this.rtpBridge.audioWriter.close();
+            this._log('info', `RX recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
+          } catch (e) { this._log('warn', `RX recording close error: ${e.message}`); }
+          this.rtpBridge.audioWriter = null;
+        }
+        if (this.rtpBridge.txWriter) {
+          try {
+            const info = this.rtpBridge.txWriter.close();
+            if (info.size > 0) this._log('info', `TX recording saved: ${this.rtpBridge.txWriter.filename} (~${info.duration}s)`);
+          } catch (e) { this._log('warn', `TX recording close error: ${e.message}`); }
+          this.rtpBridge.txWriter = null;
+        }
+        this.rtpBridge.recording = false;
       }
       const stats = this.rtpBridge.getStats();
       this._log('info', `Call stats — codec:${stats.codec} rx:${stats.rxPackets}pkts tx:${stats.txPackets}pkts lost:${stats.lostPackets} jitter:${stats.jitterMs}ms`);
@@ -1155,13 +1172,16 @@ class SipManager extends EventEmitter {
       if (this.rtpBridge.recording) return reject(new Error('Already recording'));
       const path = require('path');
       const { AudioWriter } = require('./audioDecoder');
-      const id       = this.activeCall?.callId || 'manual';
-      const filePath = path.join(__dirname, '../captures', `rec_${id.slice(0,8)}_${Date.now()}.wav`);
-      this.rtpBridge.audioWriter = new AudioWriter(filePath);
+      const id      = this.activeCall?.callId || 'manual';
+      const ts      = Date.now();
+      const rxPath  = path.join(__dirname, '../captures', `rec_${id.slice(0,8)}_${ts}_rx.wav`);
+      const txPath  = path.join(__dirname, '../captures', `rec_${id.slice(0,8)}_${ts}_tx.wav`);
+      this.rtpBridge.audioWriter = new AudioWriter(rxPath);
+      this.rtpBridge.txWriter    = new AudioWriter(txPath);
       this.rtpBridge.startRecording();
-      this._log('info', `Recording started: ${path.basename(filePath)}`);
+      this._log('info', `Recording started: ${path.basename(rxPath)} + ${path.basename(txPath)}`);
       this.emit('recordingStarted', { callId: this.activeCall?.callId });
-      resolve({ recording: true, file: path.basename(filePath) });
+      resolve({ recording: true, file: path.basename(rxPath) });
     });
   }
 
@@ -1170,18 +1190,29 @@ class SipManager extends EventEmitter {
       if (!this.rtpBridge)           return reject(new Error('No active call'));
       if (!this.rtpBridge.recording) return reject(new Error('Not recording'));
       this.rtpBridge.stopRecording();
+      const path = require('path');
       let audioFile = null;
+      let txFile    = null;
       if (this.rtpBridge.audioWriter) {
         try {
           const info = this.rtpBridge.audioWriter.close();
-          const path = require('path');
           audioFile  = `/captures/${this.rtpBridge.audioWriter.filename}`;
-          this._log('info', `Recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
-        } catch (e) { this._log('warn', `Recording save error: ${e.message}`); }
+          this._log('info', `RX recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
+        } catch (e) { this._log('warn', `RX recording save error: ${e.message}`); }
         this.rtpBridge.audioWriter = null;
       }
-      this.emit('recordingStopped', { callId: this.activeCall?.callId, audioFile });
-      resolve({ recording: false, audioFile });
+      if (this.rtpBridge.txWriter) {
+        try {
+          const info = this.rtpBridge.txWriter.close();
+          if (info.size > 0) {
+            txFile = `/captures/${this.rtpBridge.txWriter.filename}`;
+            this._log('info', `TX recording saved: ${this.rtpBridge.txWriter.filename} (~${info.duration}s)`);
+          }
+        } catch (e) { this._log('warn', `TX recording save error: ${e.message}`); }
+        this.rtpBridge.txWriter = null;
+      }
+      this.emit('recordingStopped', { callId: this.activeCall?.callId, audioFile, txFile });
+      resolve({ recording: false, audioFile, txFile });
     });
   }
 
