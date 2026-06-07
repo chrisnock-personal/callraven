@@ -133,7 +133,10 @@ sipManager.on('callConnected', (d) => {
   liveTranscriberFn = (pt, raw) => liveTranscriber.write(pt, raw);
   liveTranscriber.on('text', broadcastTranscript);
   // Use onRawAudio so G.722 is decoded by ffmpeg at flush, not the stub decoder
-  if (sipManager.rtpBridge) sipManager.rtpBridge.onRawAudio = liveTranscriberFn;
+  if (sipManager.rtpBridge) {
+    sipManager.rtpBridge.onRawAudio         = liveTranscriberFn;
+    sipManager.rtpBridge.onRawOutboundAudio = (pt, raw) => liveTranscriber.writeOutbound(pt, raw);
+  }
   liveTranscriber.start();
 });
 sipManager.on('callFailed',        (d) => broadcast('callFailed', d));
@@ -146,6 +149,7 @@ sipManager.on('callEnded', (data) => {
   broadcast('callEnded', data);
   if (liveTranscriber)   { liveTranscriber.stop(); liveTranscriber = null; }
   liveTranscriberFn = null;
+  if (sipManager.rtpBridge) sipManager.rtpBridge.onRawOutboundAudio = null;
   // Capture is stopped explicitly in /api/hangup for local hangups.
   // For remote hangups (far end sends BYE), stop it here after a small
   // delay so any final SIP messages (remote BYE) have time to be written.
@@ -528,15 +532,17 @@ app.get('/api/transcripts', (req, res) => {
   res.json({ transcripts: transcribeManager.listTranscripts() });
 });
 
-/** POST /api/transcribe/:filename */
+/** POST /api/transcribe/:filename  — optional body: { txFile: "rec_..._tx.wav" } */
 app.post('/api/transcribe/:filename', async (req, res) => {
   const { filename } = req.params;
   if (!filename.startsWith('rec_') || !filename.endsWith('.wav'))
     return res.status(400).json({ error: 'Only rec_*.wav recordings can be transcribed' });
   if (!transcribeManager.isWhisperAvailable())
     return res.status(503).json({ error: 'Whisper not available — rebuild image with Whisper support' });
+  // Auto-detect paired tx file if not provided (rx file naming: rec_id_ts_rx.wav → rec_id_ts_tx.wav)
+  const txFile = req.body?.txFile || filename.replace(/_rx\.wav$/i, '_tx.wav');
   try {
-    const result = await transcribeManager.startTranscription(filename);
+    const result = await transcribeManager.startTranscription(filename, txFile !== filename ? txFile : null);
     res.json({ success: true, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
