@@ -932,6 +932,18 @@ class SipManager extends EventEmitter {
         }, delay);
       }
     }
+    // Handle remote re-INVITE SDP updates (e.g. Asterisk direct_media re-routing RTP)
+    session.on('reinvite', (e) => {
+      if (e?.originator !== 'remote') return;
+      const sdp = e?.request?.body || null;
+      if (!sdp || !this.rtpBridge) return;
+      const remote = parseRemoteSdp(sdp);
+      if (!remote) return;
+      this._log('info', `re-INVITE: updating RTP target ${this.rtpBridge.remoteIp}:${this.rtpBridge.remotePort} → ${remote.ip}:${remote.port}`);
+      this.rtpBridge.remoteIp   = remote.ip;
+      this.rtpBridge.remotePort = remote.port;
+    });
+
     session.on('progress', () => { this._log('info', 'Remote ringing'); if (this.activeCall) this.activeCall.status = 'ringing'; });
     session.on('confirmed', () => {
       this._log('info', 'Call confirmed');
