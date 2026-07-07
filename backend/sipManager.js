@@ -280,7 +280,10 @@ class RtpBridge {
     this.ssrc        = (Math.random() * 0xffffffff) >>> 0;
     this.seq         = (Math.random() * 0xffff)     >>> 0;
     this.timestamp   = (Math.random() * 0xffffffff) >>> 0;
-    this.playTimer   = null;
+    this.playTimer    = null;
+    this.silenceTimer = null;
+    this._rxWatchTimer = null;
+    this._lastRxTime   = 0;
     // RTP stats
     this.stats = {
       rxPackets: 0, txPackets: 0, rxBytes: 0, txBytes: 0,
@@ -349,9 +352,19 @@ class RtpBridge {
         this.stats.rxPackets++;
         this.stats.rxBytes += msg.length;
 
-        this.remoteSSRC = ssrc;
-        this.lastSeq    = seq;
-        this.lastTs     = ts;
+        this.remoteSSRC  = ssrc;
+        this.lastSeq     = seq;
+        this.lastTs      = ts;
+        this._lastRxTime = Date.now();
+        if (this.silenceTimer) this._stopSilence();
+
+        // Follow actual RTP source — handles Asterisk direct_media re-routing
+        // without relying on re-INVITE SDP parsing
+        if (rinfo.address !== this.remoteIp || rinfo.port !== this.remotePort) {
+          console.log(`[RTP] Source changed ${this.remoteIp}:${this.remotePort} → ${rinfo.address}:${rinfo.port}`);
+          this.remoteIp   = rinfo.address;
+          this.remotePort = rinfo.port;
+        }
 
         if (!this.playing) {
           this.seq       = seq;
@@ -385,9 +398,11 @@ class RtpBridge {
       this.stats.txPackets++;
       this.stats.txBytes += msg.length;
     });
-    this.socket.on('error', (err) => console.error(`[RTP] ${err.message}`));
+    this.socket.on('error', (err) => console.error(`[RTP] socket error: ${err.message}`));
     this.socket.bind(this.localPort, () => {
-      console.log(`[RTP] ${this.localPort} <-> ${this.remoteIp}:${this.remotePort}`);
+      const addr = this.socket.address();
+      console.log(`[RTP] bound ${addr.address}:${addr.port} -> ${this.remoteIp}:${this.remotePort}`);
+      this._startRxWatch();
     });
   }
 
@@ -506,6 +521,39 @@ class RtpBridge {
   stopPlayback() {
     if (this.playTimer) { clearInterval(this.playTimer); this.playTimer = null; }
     this.playing = false;
+    this._startSilence();
+  }
+
+  // Send silence frames after WAV ends to prevent RTP timeout on the far end
+  _startSilence() {
+    if (this.silenceTimer) return;
+    const codec = this.stats.codec || '';
+    const isG722 = codec.includes('G722');
+    const frame  = isG722 ? Buffer.alloc(160, 0x00) : Buffer.alloc(160, 0x7f);
+    this.silenceTimer = setInterval(() => {
+      if (!this.socket || this.playing || this.held) { this._stopSilence(); return; }
+      if (isG722) this.sendRtpG722(frame);
+      else        this.sendRtp(frame);
+    }, 20);
+  }
+
+  _stopSilence() {
+    if (this.silenceTimer) { clearInterval(this.silenceTimer); this.silenceTimer = null; }
+  }
+
+  // Watch for inbound RTP going quiet; start silence keepalive if >1s with no packets
+  _startRxWatch() {
+    if (this._rxWatchTimer) return;
+    this._rxWatchTimer = setInterval(() => {
+      if (!this.socket || this.playing || this.held || this.silenceTimer) return;
+      if (this._lastRxTime > 0 && Date.now() - this._lastRxTime > 1000) {
+        this._startSilence();
+      }
+    }, 500);
+  }
+
+  _stopRxWatch() {
+    if (this._rxWatchTimer) { clearInterval(this._rxWatchTimer); this._rxWatchTimer = null; }
   }
 
   // Decode inbound RTP payload to 16-bit PCM and relay to onAudio callback
@@ -569,6 +617,8 @@ class RtpBridge {
   }
 
   stop() {
+    this._stopRxWatch();
+    this._stopSilence();
     this.stopPlayback();
     if (this.socket) {
       try { this.socket.close(); } catch (e) {}
@@ -912,6 +962,13 @@ class SipManager extends EventEmitter {
       const inviteRequest = session._request || null;
       const remoteSdp     = inviteRequest?.body || null;
       this._log('info', `INVITE SDP: ${remoteSdp ? 'found' : 'missing'}`);
+      if (remoteSdp) {
+        const sdpProto = remoteSdp.match(/^m=\S+\s+\d+\s+(\S+)/m)?.[1] || 'unknown';
+        const hasIce   = remoteSdp.includes('a=ice-ufrag');
+        const hasDtls  = remoteSdp.includes('a=fingerprint');
+        this._log('info', `INVITE SDP media-proto=${sdpProto} ice=${hasIce} dtls=${hasDtls}`);
+        if (hasIce || hasDtls) this._log('warn', 'Asterisk using WebRTC (DTLS/ICE) for this endpoint — plain RTP will not work; disable webrtc=yes on the Asterisk endpoint');
+      }
       this.incomingCall = {
         session, from: session.remote_identity.uri.toString(),
         displayName: session.remote_identity.display_name || session.remote_identity.uri.user,
@@ -932,17 +989,35 @@ class SipManager extends EventEmitter {
         }, delay);
       }
     }
-    // Handle remote re-INVITE SDP updates (e.g. Asterisk direct_media re-routing RTP)
-    session.on('reinvite', (e) => {
-      if (e?.originator !== 'remote') return;
-      const sdp = e?.request?.body || null;
+    // Patch receiveRequest to log every in-dialog method and intercept re-INVITE/UPDATE
+    // at the lowest level — JsSIP's reinvite/update events don't reliably fire headlessly
+    const _applyRemoteSdp = (label, request) => {
+      const sdp = request.body || null;
+      console.log(`[${label}] method=${request.method} hasBody=${!!sdp} hasRtpBridge=${!!this.rtpBridge}`);
       if (!sdp || !this.rtpBridge) return;
       const remote = parseRemoteSdp(sdp);
-      if (!remote) return;
-      this._log('info', `re-INVITE: updating RTP target ${this.rtpBridge.remoteIp}:${this.rtpBridge.remotePort} → ${remote.ip}:${remote.port}`);
-      this.rtpBridge.remoteIp   = remote.ip;
-      this.rtpBridge.remotePort = remote.port;
-    });
+      if (!remote) { console.log(`[${label}] parseRemoteSdp returned null`); return; }
+      if (remote.ip !== this.rtpBridge.remoteIp || remote.port !== this.rtpBridge.remotePort) {
+        this._log('info', `${label}: RTP target ${this.rtpBridge.remoteIp}:${this.rtpBridge.remotePort} → ${remote.ip}:${remote.port}`);
+        this.rtpBridge.remoteIp   = remote.ip;
+        this.rtpBridge.remotePort = remote.port;
+      }
+    };
+    const _origReceiveReinvite = session._receiveReinvite.bind(session);
+    session._receiveReinvite = (request) => {
+      _applyRemoteSdp('REINVITE', request);
+      return _origReceiveReinvite(request);
+    };
+    const _origReceiveUpdate = session._receiveUpdate.bind(session);
+    session._receiveUpdate = (request) => {
+      _applyRemoteSdp('UPDATE', request);
+      return _origReceiveUpdate(request);
+    };
+    const _origReceiveRequest = session.receiveRequest.bind(session);
+    session.receiveRequest = (request) => {
+      console.log(`[IN-DIALOG] ${request.method}`);
+      return _origReceiveRequest(request);
+    };
 
     session.on('progress', () => { this._log('info', 'Remote ringing'); if (this.activeCall) this.activeCall.status = 'ringing'; });
     session.on('confirmed', () => {

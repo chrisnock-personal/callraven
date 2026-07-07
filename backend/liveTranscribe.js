@@ -187,11 +187,9 @@ class LiveTranscriber extends EventEmitter {
       }
 
       const results = (await Promise.all(jobs)).filter(Boolean);
-      const diarized = results.some(r => r.speaker === 'Local');
 
       for (const r of results) {
-        const line = diarized ? `[${r.speaker}] ${r.text}` : r.text;
-        this.emit('text', line);
+        this.emit('text', `[${r.speaker}] ${r.text}`);
       }
     } catch (_) {
       // skip this window on any error
