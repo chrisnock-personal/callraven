@@ -1,0 +1,5 @@
+[0:00] This is an automated compliance test.
+[0:03] Do not hang up the call.
+[0:05] Please remain on the line while your call is recorded.
+[0:08] This call may be monitored for quality and compliance purposes.
+[0:13] Thank you.
