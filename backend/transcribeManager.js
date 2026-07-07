@@ -23,79 +23,99 @@ const jobs = new Map();
 
 /**
  * Start transcription of a recording file.
- * @param {string} recFilename - e.g. "rec_abc123_1234567890.wav"
- * @returns {Promise<{jobId, status}>}
+ * @param {string} rxFilename - inbound recording, e.g. "rec_abc123_ts_rx.wav"
+ * @param {string} [txFilename] - optional outbound recording, e.g. "rec_abc123_ts_tx.wav"
+ * @returns {Promise<{status}>}
  */
-function startTranscription(recFilename) {
+function startTranscription(rxFilename, txFilename) {
   return new Promise((resolve, reject) => {
-    const recPath = path.join(CAPTURES_DIR, recFilename);
-    if (!fs.existsSync(recPath)) {
-      return reject(new Error(`Recording not found: ${recFilename}`));
+    const rxPath = path.join(CAPTURES_DIR, rxFilename);
+    if (!fs.existsSync(rxPath)) {
+      return reject(new Error(`Recording not found: ${rxFilename}`));
     }
 
-    // Derive transcript filename
-    const base       = recFilename.replace(/\.wav$/i, '');
-    const transcriptPath = path.join(CAPTURES_DIR, `${base}.json`);
-
-    if (jobs.get(recFilename)?.status === 'processing') {
+    if (jobs.get(rxFilename)?.status === 'processing') {
       return reject(new Error('Transcription already in progress'));
     }
 
-    jobs.set(recFilename, { status: 'processing', startedAt: Date.now() });
-    resolve({ status: 'processing', filename: recFilename });
+    // Derive transcript filename from the rx file (strip _rx suffix if present)
+    const base           = rxFilename.replace(/_rx\.wav$/i, '').replace(/\.wav$/i, '');
+    const transcriptPath = path.join(CAPTURES_DIR, `${base}.json`);
 
-    // Run async
-    _runTranscription(recPath, transcriptPath, recFilename)
+    // Resolve optional tx file
+    const txPath = txFilename
+      ? path.join(CAPTURES_DIR, txFilename)
+      : null;
+    const hasTx = txPath && fs.existsSync(txPath);
+
+    jobs.set(rxFilename, { status: 'processing', startedAt: Date.now() });
+    resolve({ status: 'processing', filename: rxFilename });
+
+    _runTranscription(rxPath, txPath && hasTx ? txPath : null, transcriptPath, rxFilename)
       .then(() => {
-        const job = jobs.get(recFilename) || {};
-        job.status    = 'done';
-        job.finishedAt = Date.now();
+        const job = jobs.get(rxFilename) || {};
+        job.status       = 'done';
+        job.finishedAt   = Date.now();
         job.transcriptFile = `${base}.json`;
-        jobs.set(recFilename, job);
-        console.log(`[TRANSCRIBE] Done: ${recFilename} -> ${base}.json`);
+        jobs.set(rxFilename, job);
+        console.log(`[TRANSCRIBE] Done: ${rxFilename} -> ${base}.json`);
       })
       .catch(err => {
-        const job = jobs.get(recFilename) || {};
+        const job = jobs.get(rxFilename) || {};
         job.status = 'error';
         job.error  = err.message;
-        jobs.set(recFilename, job);
-        console.error(`[TRANSCRIBE] Error: ${recFilename}: ${err.message}`);
+        jobs.set(rxFilename, job);
+        console.error(`[TRANSCRIBE] Error: ${rxFilename}: ${err.message}`);
       });
   });
 }
 
-async function _runTranscription(recPath, transcriptPath, recFilename) {
-  // Step 1: resample to 16kHz mono WAV (Whisper requirement)
-  const tmpPath = recPath.replace(/\.wav$/i, '_16k.wav');
-  await _ffmpegResample(recPath, tmpPath);
+async function _runTranscription(rxPath, txPath, transcriptPath, rxFilename) {
+  // Resample inbound (remote) to 16kHz mono
+  const rxTmp  = rxPath.replace(/\.wav$/i, '_16k.wav');
+  await _ffmpegResample(rxPath, rxTmp);
 
-  // Step 2: run whisper-cli
-  const srtPath = tmpPath.replace(/\.wav$/i, '.srt');
-  await _runWhisper(tmpPath, srtPath);
+  // Run whisper on inbound
+  const rxSrt  = rxTmp.replace(/\.wav$/i, '.srt');
+  await _runWhisper(rxTmp, rxSrt);
+  const rxSegs = parseSrt(fs.existsSync(rxSrt) ? fs.readFileSync(rxSrt, 'utf8') : '')
+    .map(s => ({ ...s, speaker: 'Remote' }));
+  [rxTmp, rxSrt].forEach(f => { try { fs.unlinkSync(f); } catch(_) {} });
 
-  // Step 3: parse SRT -> JSON segments
-  const srtText = fs.existsSync(srtPath)
-    ? fs.readFileSync(srtPath, 'utf8')
-    : '';
-  const segments = parseSrt(srtText);
+  // Optionally run whisper on outbound (local WAV playback)
+  let txSegs = [];
+  if (txPath) {
+    const txTmp = txPath.replace(/\.wav$/i, '_16k.wav');
+    try {
+      await _ffmpegResample(txPath, txTmp);
+      const txSrt = txTmp.replace(/\.wav$/i, '.srt');
+      await _runWhisper(txTmp, txSrt);
+      txSegs = parseSrt(fs.existsSync(txSrt) ? fs.readFileSync(txSrt, 'utf8') : '')
+        .map(s => ({ ...s, speaker: 'Local' }));
+      [txTmp, txSrt].forEach(f => { try { fs.unlinkSync(f); } catch(_) {} });
+    } catch (e) {
+      console.warn(`[TRANSCRIBE] TX whisper failed (non-fatal): ${e.message}`);
+      try { fs.unlinkSync(txTmp); } catch(_) {}
+    }
+  }
 
-  // Step 4: build transcript object and save
-  const stat     = fs.statSync(recPath);
+  // Merge and sort by start time
+  const segments = [...rxSegs, ...txSegs].sort((a, b) => a.startSec - b.startSec);
+  const diarized = txSegs.length > 0;
+
   const transcript = {
-    filename:    path.basename(transcriptPath),   // rec_xxx.json
-    recFilename: recFilename,                     // rec_xxx.wav
+    filename:    path.basename(transcriptPath),
+    recFilename: rxFilename,
     model:       'whisper-small.en',
+    diarized,
     generatedAt: new Date().toISOString(),
     duration:    segments.length ? segments[segments.length - 1].endSec : 0,
     wordCount:   segments.reduce((n, s) => n + s.text.trim().split(/\s+/).length, 0),
     segments,
-    text:        segments.map(s => s.text.trim()).join(' '),
+    text: segments.map(s => diarized ? `[${s.speaker}] ${s.text.trim()}` : s.text.trim()).join(' '),
   };
 
   fs.writeFileSync(transcriptPath, JSON.stringify(transcript, null, 2), 'utf8');
-
-  // Cleanup temp files
-  [tmpPath, srtPath].forEach(f => { try { fs.unlinkSync(f); } catch(e) {} });
 }
 
 function _ffmpegResample(input, output) {
