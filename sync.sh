@@ -27,8 +27,13 @@ FRONTEND_ONLY=false
 BACKEND_ONLY=false
 SHOW_LOGS=false
 
+<<<<<<< HEAD
 while [ $# -gt 0 ]; do
   case "$1" in
+=======
+while [[ $# -gt 0 ]]; do
+  case $1 in
+>>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
     --sync-only)     SYNC_ONLY=true ;;
     --rebuild-only)  REBUILD_ONLY=true ;;
     --frontend-only) FRONTEND_ONLY=true ;;
@@ -38,20 +43,29 @@ while [ $# -gt 0 ]; do
     --help|-h)
       echo "Usage: ./sync.sh [user@host] [options]"
       echo ""
+<<<<<<< HEAD
       echo "  user@host          Override remote host (positional, e.g. chris@192.168.1.241)"
+=======
+      echo "  user@host          Remote host to deploy to (overrides \$SIP_REMOTE)"
+>>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
       echo "  (no args)          Sync files + full podman rebuild + restart"
       echo "  --sync-only        Sync files only, skip rebuild"
       echo "  --frontend-only    Hot-push frontend/index.html into running container (fast)"
       echo "  --backend-only     Hot-push backend/*.js into running container + restart node"
       echo "  --rebuild-only     Full podman rebuild on remote without syncing first"
       echo "  --logs             Tail container logs after deploy"
+<<<<<<< HEAD
       echo "  --host user@ip     Override remote host (flag form)"
+=======
+      echo "  --host user@ip     Override remote host (alternative to positional arg)"
+>>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
       echo ""
       echo "  Env vars:"
       echo "    SIP_REMOTE=user@host    change default remote (current: $REMOTE_HOST)"
       echo "    SIP_REMOTE_DIR=path     change remote path   (current: $REMOTE_DIR)"
       exit 0
       ;;
+<<<<<<< HEAD
     -*)
       echo "Unknown option: $1" >&2
       exit 1
@@ -59,6 +73,10 @@ while [ $# -gt 0 ]; do
     *)
       REMOTE_HOST="$1"
       ;;
+=======
+    *@*)             REMOTE_HOST="$1" ;;
+    *)               echo "Unknown argument: $1"; exit 1 ;;
+>>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
   esac
   shift
 done

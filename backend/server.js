@@ -10,10 +10,11 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
-const sipManager     = require('./sipManager');
-const callHistory    = require('./callHistory');
+const sipManager        = require('./sipManager');
+const callHistory       = require('./callHistory');
 const captureManager    = require('./captureManager');
 const transcribeManager = require('./transcribeManager');
+const { LiveTranscriber, WINDOW_MS } = require('./liveTranscribe');
 
 const app    = express();
 const server = http.createServer(app);
@@ -38,7 +39,30 @@ const upload = multer({ storage, fileFilter: (req, file, cb) => {
 }});
 
 // ─── WebSocket hub ────────────────────────────────────────────────────────────
-const clients = new Set();
+const clients           = new Set();
+const transcriptClients = new Set();
+
+// Fan-out dispatch for onAudio — supports multiple consumers (browser relay + live transcriber)
+const audioListeners = new Set();
+function dispatchAudio(pt, pcm16) {
+  for (const fn of audioListeners) fn(pt, pcm16);
+}
+function addAudioListener(fn) {
+  audioListeners.add(fn);
+  if (sipManager.rtpBridge) sipManager.rtpBridge.onAudio = dispatchAudio;
+}
+function removeAudioListener(fn) {
+  audioListeners.delete(fn);
+  if (audioListeners.size === 0 && sipManager.rtpBridge)
+    sipManager.rtpBridge.onAudio = null;
+}
+
+function broadcastTranscript(text) {
+  const msg = JSON.stringify({ type: 'transcript', text, ts: Date.now() });
+  for (const ws of transcriptClients)
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  broadcast('transcriptChunk', { text, ts: Date.now() });
+}
 
 wss.on('connection', (ws, req) => {
   const url = req.url || '/';
@@ -48,11 +72,10 @@ wss.on('connection', (ws, req) => {
     let active = true;
     ws.binaryType = 'arraybuffer';
 
-    // Wire up onAudio callback to this client
     const relay = (pt, pcm16) => {
       if (!active || ws.readyState !== WebSocket.OPEN) return;
       try {
-        // Header: [pt:1][sampleRate:4 LE][pcm16...]
+        // Frame: [pt:1][sampleRate:4 LE][pcm16...]
         const sampleRate = (pt === 9) ? 16000 : 8000;
         const buf = Buffer.alloc(5 + pcm16.length);
         buf[0] = pt;
@@ -62,19 +85,20 @@ wss.on('connection', (ws, req) => {
       } catch(e) {}
     };
 
-    // Register relay with active bridge
-    if (sipManager.rtpBridge) sipManager.rtpBridge.onAudio = relay;
+    addAudioListener(relay);
+    ws.on('close', () => { active = false; removeAudioListener(relay); });
+    return;
+  }
 
-    // Also register for future calls
-    sipManager.on('callConnected', () => {
-      if (sipManager.rtpBridge) sipManager.rtpBridge.onAudio = relay;
-    });
-
-    ws.on('close', () => {
-      active = false;
-      if (sipManager.rtpBridge && sipManager.rtpBridge.onAudio === relay)
-        sipManager.rtpBridge.onAudio = null;
-    });
+  // ── Live transcript WebSocket (/transcript) ───────────────────────────────
+  if (url === '/transcript') {
+    transcriptClients.add(ws);
+    ws.send(JSON.stringify({
+      type:      'connected',
+      whisper:   transcribeManager.isWhisperAvailable(),
+      windowMs:  WINDOW_MS,
+    }));
+    ws.on('close', () => transcriptClients.delete(ws));
     return;
   }
 
@@ -95,7 +119,26 @@ sipManager.on('registered',        (d) => broadcast('registered', d));
 sipManager.on('unregistered',      (d) => broadcast('unregistered', d));
 sipManager.on('registrationFailed',(d) => broadcast('registrationFailed', d));
 sipManager.on('incomingCall',      (d) => broadcast('incomingCall', d));
-sipManager.on('callConnected',     (d) => broadcast('callConnected', d));
+let liveTranscriber   = null;
+let liveTranscriberFn = null;
+
+sipManager.on('callConnected', (d) => {
+  broadcast('callConnected', d);
+  // Attach audio dispatcher to new bridge
+  if (sipManager.rtpBridge) sipManager.rtpBridge.onAudio = dispatchAudio;
+  // Start live transcription if whisper is available
+  if (!transcribeManager.isWhisperAvailable()) return;
+  if (liveTranscriber) liveTranscriber.stop();
+  liveTranscriber   = new LiveTranscriber();
+  liveTranscriberFn = (pt, raw) => liveTranscriber.write(pt, raw);
+  liveTranscriber.on('text', broadcastTranscript);
+  // Use onRawAudio so G.722 is decoded by ffmpeg at flush, not the stub decoder
+  if (sipManager.rtpBridge) {
+    sipManager.rtpBridge.onRawAudio         = liveTranscriberFn;
+    sipManager.rtpBridge.onRawOutboundAudio = (pt, raw) => liveTranscriber.writeOutbound(pt, raw);
+  }
+  liveTranscriber.start();
+});
 sipManager.on('callFailed',        (d) => broadcast('callFailed', d));
 sipManager.on('log',               (d) => broadcast('log', d));
 sipManager.on('conferenceStarted', (d) => broadcast('conferenceStarted', d));
@@ -104,6 +147,9 @@ sipManager.on('playbackEnded',     (d) => broadcast('playbackEnded', d));
 
 sipManager.on('callEnded', (data) => {
   broadcast('callEnded', data);
+  if (liveTranscriber)   { liveTranscriber.stop(); liveTranscriber = null; }
+  liveTranscriberFn = null;
+  if (sipManager.rtpBridge) sipManager.rtpBridge.onRawOutboundAudio = null;
   // Capture is stopped explicitly in /api/hangup for local hangups.
   // For remote hangups (far end sends BYE), stop it here after a small
   // delay so any final SIP messages (remote BYE) have time to be written.
@@ -132,6 +178,13 @@ captureManager.on('captureReady', (data) => {
 // ─── REST API ─────────────────────────────────────────────────────────────────
 
 app.get('/api/status', (req, res) => res.json(sipManager.getState()));
+
+app.get('/api/transcript/status', (req, res) => res.json({
+  whisperAvailable: transcribeManager.isWhisperAvailable(),
+  active:           !!liveTranscriber,
+  windowMs:         WINDOW_MS,
+  clients:          transcriptClients.size,
+}));
 
 app.post('/api/register', async (req, res) => {
   const { server, port, username, password, displayName, transport, wsPort, wsPath } = req.body;
@@ -479,15 +532,17 @@ app.get('/api/transcripts', (req, res) => {
   res.json({ transcripts: transcribeManager.listTranscripts() });
 });
 
-/** POST /api/transcribe/:filename */
+/** POST /api/transcribe/:filename  — optional body: { txFile: "rec_..._tx.wav" } */
 app.post('/api/transcribe/:filename', async (req, res) => {
   const { filename } = req.params;
   if (!filename.startsWith('rec_') || !filename.endsWith('.wav'))
     return res.status(400).json({ error: 'Only rec_*.wav recordings can be transcribed' });
   if (!transcribeManager.isWhisperAvailable())
     return res.status(503).json({ error: 'Whisper not available — rebuild image with Whisper support' });
+  // Auto-detect paired tx file if not provided (rx file naming: rec_id_ts_rx.wav → rec_id_ts_tx.wav)
+  const txFile = req.body?.txFile || filename.replace(/_rx\.wav$/i, '_tx.wav');
   try {
-    const result = await transcribeManager.startTranscription(filename);
+    const result = await transcribeManager.startTranscription(filename, txFile !== filename ? txFile : null);
     res.json({ success: true, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
