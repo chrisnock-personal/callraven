@@ -4,12 +4,13 @@
 #
 # Usage:
 #   ./sync.sh                    # sync + full rebuild + restart
+#   ./sync.sh chris@192.168.1.241 # override remote host (positional)
 #   ./sync.sh --sync-only        # sync files only, no rebuild
 #   ./sync.sh --frontend-only    # push frontend/index.html into running container (fast)
 #   ./sync.sh --backend-only     # push backend JS into running container + restart node
 #   ./sync.sh --rebuild-only     # full podman rebuild without syncing
 #   ./sync.sh --logs             # tail container logs after deploy
-#   ./sync.sh --host user@ip     # override remote host
+#   ./sync.sh --host user@ip     # override remote host (explicit flag)
 
 set -e
 
@@ -26,8 +27,8 @@ FRONTEND_ONLY=false
 BACKEND_ONLY=false
 SHOW_LOGS=false
 
-for arg in "$@"; do
-  case $arg in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --sync-only)     SYNC_ONLY=true ;;
     --rebuild-only)  REBUILD_ONLY=true ;;
     --frontend-only) FRONTEND_ONLY=true ;;
@@ -35,22 +36,31 @@ for arg in "$@"; do
     --logs)          SHOW_LOGS=true ;;
     --host)          shift; REMOTE_HOST="$1" ;;
     --help|-h)
-      echo "Usage: ./sync.sh [options]"
+      echo "Usage: ./sync.sh [user@host] [options]"
       echo ""
+      echo "  user@host          Override remote host (positional, e.g. chris@192.168.1.241)"
       echo "  (no args)          Sync files + full podman rebuild + restart"
       echo "  --sync-only        Sync files only, skip rebuild"
       echo "  --frontend-only    Hot-push frontend/index.html into running container (fast)"
       echo "  --backend-only     Hot-push backend/*.js into running container + restart node"
       echo "  --rebuild-only     Full podman rebuild on remote without syncing first"
       echo "  --logs             Tail container logs after deploy"
-      echo "  --host user@ip     Override remote host (default: \$REMOTE_HOST)"
+      echo "  --host user@ip     Override remote host (flag form)"
       echo ""
       echo "  Env vars:"
       echo "    SIP_REMOTE=user@host    change default remote (current: $REMOTE_HOST)"
       echo "    SIP_REMOTE_DIR=path     change remote path   (current: $REMOTE_DIR)"
       exit 0
       ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      REMOTE_HOST="$1"
+      ;;
   esac
+  shift
 done
 
 echo "📡  SIP Endpoint Sync & Deploy"
