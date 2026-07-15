@@ -63,7 +63,6 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 | `backend/liveTranscribe.js` | Real-time windowed Whisper transcription during an active call |
 | `frontend/index.html` | Single-file softphone UI (Clarity theme) |
 | `openapi.json` | OpenAPI 3.1 spec — import into Postman, Swagger, Redocly |
-| `asterisk/` | Sample Asterisk config (`sip.conf`, `extensions.conf`, `http.conf`) for local testing |
 | `sync.sh` | Rsync + podman-compose deploy helper for pushing local changes to a remote host |
 
 ---
