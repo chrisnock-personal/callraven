@@ -3,3 +3,6 @@ sip_call_*.py
 
 # Optional: ignore local outputs
 output/
+
+# Local-only project instructions, not for the repo
+CLAUDE.md
