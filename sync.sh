@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./sync.sh                    # sync + full rebuild + restart
-#   ./sync.sh chris@192.168.1.241 # override remote host (positional)
+#   ./sync.sh user@192.0.2.10    # override remote host (positional)
 #   ./sync.sh --sync-only        # sync files only, no rebuild
 #   ./sync.sh --frontend-only    # push frontend/index.html into running container (fast)
 #   ./sync.sh --backend-only     # push backend JS into running container + restart node
@@ -15,7 +15,7 @@
 set -e
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-REMOTE_HOST="${SIP_REMOTE:-chris@192.168.1.135}"
+REMOTE_HOST="${SIP_REMOTE:-}"
 REMOTE_DIR="${SIP_REMOTE_DIR:-~/Apps/container-sip-endpoint}"
 CONTAINER_NAME="sip-endpoint"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,13 +27,8 @@ FRONTEND_ONLY=false
 BACKEND_ONLY=false
 SHOW_LOGS=false
 
-<<<<<<< HEAD
-while [ $# -gt 0 ]; do
-  case "$1" in
-=======
 while [[ $# -gt 0 ]]; do
-  case $1 in
->>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
+  case "$1" in
     --sync-only)     SYNC_ONLY=true ;;
     --rebuild-only)  REBUILD_ONLY=true ;;
     --frontend-only) FRONTEND_ONLY=true ;;
@@ -43,43 +38,34 @@ while [[ $# -gt 0 ]]; do
     --help|-h)
       echo "Usage: ./sync.sh [user@host] [options]"
       echo ""
-<<<<<<< HEAD
-      echo "  user@host          Override remote host (positional, e.g. chris@192.168.1.241)"
-=======
       echo "  user@host          Remote host to deploy to (overrides \$SIP_REMOTE)"
->>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
       echo "  (no args)          Sync files + full podman rebuild + restart"
       echo "  --sync-only        Sync files only, skip rebuild"
       echo "  --frontend-only    Hot-push frontend/index.html into running container (fast)"
       echo "  --backend-only     Hot-push backend/*.js into running container + restart node"
       echo "  --rebuild-only     Full podman rebuild on remote without syncing first"
       echo "  --logs             Tail container logs after deploy"
-<<<<<<< HEAD
-      echo "  --host user@ip     Override remote host (flag form)"
-=======
       echo "  --host user@ip     Override remote host (alternative to positional arg)"
->>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
       echo ""
       echo "  Env vars:"
       echo "    SIP_REMOTE=user@host    change default remote (current: $REMOTE_HOST)"
       echo "    SIP_REMOTE_DIR=path     change remote path   (current: $REMOTE_DIR)"
       exit 0
       ;;
-<<<<<<< HEAD
     -*)
       echo "Unknown option: $1" >&2
       exit 1
       ;;
-    *)
-      REMOTE_HOST="$1"
-      ;;
-=======
     *@*)             REMOTE_HOST="$1" ;;
-    *)               echo "Unknown argument: $1"; exit 1 ;;
->>>>>>> 3b6b0ad9975100972c7adee7a6c5acb162ed9954
+    *)               echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
   shift
 done
+
+if [ -z "$REMOTE_HOST" ]; then
+  echo "Error: no remote host set. Pass user@host positionally, use --host, or set \$SIP_REMOTE." >&2
+  exit 1
+fi
 
 echo "📡  SIP Endpoint Sync & Deploy"
 echo "    Local:     $LOCAL_DIR"

@@ -27,7 +27,7 @@ The Python test scripts in the repo root exercise the full REST API end-to-end a
 ```bash
 # Single-call test (you answer on a remote device)
 python3 sip_call_test.py --ep1-url http://localhost:3000 \
-  --sip-server 192.168.1.127 --ep1-user 1112 --ep1-pass secret --target 1113
+  --sip-server 192.0.2.10 --ep1-user 1112 --ep1-pass secret --target 1113
 
 # P2P test (two local containers call each other)
 python3 sip_call_p2p_test.py

@@ -18,7 +18,7 @@ services:
       RTP_PORT_HIGH: 20000
       CAPTURE_INTERFACE: any
       STUN_SERVER: stun:stun.l.google.com:19302
-      # MEDIA_IP: 192.168.1.169  # Override if container picks wrong NIC for SDP/RTP
+      # MEDIA_IP: 192.0.2.10  # Override if container picks wrong NIC for SDP/RTP
     restart: unless-stopped
 
 volumes:
