@@ -1,0 +1,5 @@
+# Ignore sample scripts
+sip_call_*.py
+
+# Optional: ignore local outputs
+output/
