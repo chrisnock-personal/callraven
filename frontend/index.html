@@ -163,11 +163,17 @@
     main {
       flex: 1 1 0;
       display: grid;
-      grid-template-columns: 288px 1fr 300px;
+      grid-template-columns: 288px minmax(360px, 480px) 300px;
+      justify-content: center;  /* leftover space goes to the outer edges, not between panels */
       grid-template-rows: 1fr;
       min-height: 0;          /* critical — lets flex:1 be bounded by parent */
       overflow: hidden;
+      transition: grid-template-columns 0.15s ease;
     }
+
+    main.side-panels-collapsed { grid-template-columns: 1fr; }
+    main.side-panels-collapsed .panel:nth-child(1),
+    main.side-panels-collapsed .panel:nth-child(3) { display: none; }
 
     /* ── Panel ───────────────────────────────────────────────────────── */
     .panel {
@@ -176,6 +182,14 @@
       flex-direction: column;
       overflow: hidden;
       background: var(--surface);
+    }
+
+    /* Cap the dialer panel's width so it doesn't stretch edge-to-edge on wide
+       viewports — it's centered within whatever space the grid track gives it. */
+    .panel-center {
+      max-width: 480px;
+      width: 100%;
+      justify-self: center;
     }
 
     .panel-header {
@@ -486,6 +500,13 @@
 
     .dial-input-row { display: flex; gap: 8px; margin-bottom: 12px; }
     .dial-input-row input { flex: 1; font-size: 14px; }
+
+    .unreg-box  { margin: -4px 0 12px; }
+    .unreg-hint { font-size: 11px; color: var(--text-mid); }
+    .unreg-hint code { background: var(--bg2); padding: 1px 4px; border-radius: 4px; font-family: var(--mono); }
+    .unreg-hint a { color: var(--blue-mid); font-weight: 600; cursor: pointer; text-decoration: none; margin-left: 4px; }
+    .unreg-advanced { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .unreg-advanced .field-group { margin-bottom: 0; }
 
     .dtmf-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; }
 
@@ -1057,8 +1078,21 @@
       border-radius: 10px;
       overflow: hidden;
       box-shadow: var(--shadow-sm);
-      margin-top: 16px;
     }
+
+    .api-ref { margin-top: 16px; }
+    .api-ref-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+      padding: 4px 2px 10px;
+    }
+    .api-ref-header:hover .section-title { color: var(--text); }
+    .api-ref .log-toggle-arrow { transition: transform 0.25s cubic-bezier(0.4,0,0.2,1); }
+    .api-ref.collapsed .log-toggle-arrow { transform: rotate(-90deg); }
+    .api-ref.collapsed .api-ref-body { display: none; }
 
     .api-row {
       display: flex;
@@ -1228,6 +1262,7 @@
         overflow-y: auto;
       }
       .panel:nth-child(3) { grid-column: 1 / -1; border-right: none; border-top: 1px solid var(--border); max-height: 400px; }
+      main.side-panels-collapsed { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 768px) {
@@ -1259,10 +1294,15 @@
   <div class="header-sep"></div>
   <div style="font-size:12px;color:var(--text-mid);">Containerized Softphone</div>
 
-  <button id="theme-toggle" onclick="toggleTheme()"
+  <button id="side-panels-toggle" onclick="toggleSidePanels()"
     style="background:none;border:1px solid var(--border2);color:var(--text-mid);
            padding:5px 10px;border-radius:8px;cursor:pointer;font-size:13px;
            transition:all 0.15s;margin-left:auto;"
+    title="Hide side panels">▤</button>
+  <button id="theme-toggle" onclick="toggleTheme()"
+    style="background:none;border:1px solid var(--border2);color:var(--text-mid);
+           padding:5px 10px;border-radius:8px;cursor:pointer;font-size:13px;
+           transition:all 0.15s;"
     title="Toggle dark/light mode">🌙</button>
   <div class="status-group">
     <div class="status-badge reg-idle" id="reg-badge">
@@ -1319,7 +1359,13 @@
         <button class="btn btn-outline" id="btn-unregister" onclick="doUnregister()" disabled>Unreg</button>
       </div>
 
-      <div class="api-card" style="margin-top:16px;">
+      <div class="api-ref collapsed" id="api-ref">
+        <div class="api-ref-header" onclick="toggleApiRef()">
+          <span class="section-title" style="margin-bottom:0;">API Reference</span>
+          <span class="log-toggle-arrow" id="api-ref-arrow">▲</span>
+        </div>
+        <div class="api-ref-body">
+        <div class="api-card">
         <div class="api-section-label">Status &amp; Registration</div>
         <div class="api-row"><span class="api-method get">GET</span><span class="api-path">/api/status</span></div>
         <div class="api-row"><span class="api-method post">POST</span><span class="api-path">/api/register</span></div>
@@ -1357,12 +1403,14 @@
         <div class="api-row"><span class="api-method del">DEL</span><span class="api-path">/api/history</span></div>
         <div class="api-row"><span class="api-method get">GET</span><span class="api-path">/api/log/export</span></div>
       </div>
+        </div>
+      </div>
 
     </div>
   </div>
 
   <!-- CENTER: Dialpad + Controls + Inline Log -->
-  <div class="panel" style="display:flex;flex-direction:column;overflow:hidden;">
+  <div class="panel panel-center" style="display:flex;flex-direction:column;overflow:hidden;">
     <div id="centre-scroll" style="overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;">
 
     <!-- Call display -->
@@ -1421,6 +1469,23 @@
         <input id="dial-target" type="text" placeholder="Extension or sip:user@server" />
         <button class="btn btn-primary" id="btn-call"   onclick="doCall()">Call</button>
         <button class="btn btn-danger"  id="btn-hangup" onclick="doHangup()" style="display:none;">End</button>
+      </div>
+      <div class="unreg-box" id="unreg-box">
+        <div class="unreg-hint">
+          Not registered — enter <code>address@sipdomain</code> above to call directly.
+          <a onclick="toggleUnregAdvanced()" id="unreg-advanced-toggle">Advanced ▾</a>
+        </div>
+        <div class="unreg-advanced" id="unreg-advanced" style="display:none;">
+          <div class="field-group"><input id="unreg-callerid" type="text" placeholder="Caller ID (default: anonymous)"></div>
+          <div class="field-group">
+            <select id="unreg-transport">
+              <option value="UDP">UDP (ws://)</option>
+              <option value="TLS">TLS (wss://)</option>
+            </select>
+          </div>
+          <div class="field-group"><input id="unreg-wsport" type="number" placeholder="WS port (8088)"></div>
+          <div class="field-group"><input id="unreg-wspath" type="text" placeholder="WS path (/ws)"></div>
+        </div>
       </div>
       <div class="dtmf-grid">
         <button class="dtmf-key" onclick="dtmf('1')">1<span class="sub"></span></button>
@@ -1488,19 +1553,10 @@
       <div id="wav-status"></div>
     </div>
 
-    <!-- Live Transcript -->
-    <div class="section" id="live-transcript-section" style="display:none;">
-      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
-        Live Transcript
-        <button class="btn btn-outline btn-sm" onclick="clearLiveTranscript()" style="font-size:10px;padding:2px 7px;">Clear</button>
-      </div>
-      <div id="live-transcript-body" style="max-height:160px;overflow-y:auto;font-size:12px;line-height:1.6;color:var(--text-main);"></div>
-    </div>
-
     </div><!-- end scroll wrapper -->
 
     <!-- System Log — inline, flush below WAV, fills remaining height -->
-    <div class="log-inline" id="log-panel">
+    <div class="log-inline collapsed" id="log-panel">
       <div class="log-inline-header" onclick="toggleLog()">
         <div class="panel-title" style="display:flex;align-items:center;gap:8px;">
           System Log
@@ -1524,7 +1580,18 @@
     <div class="tabs">
       <button class="tab active" onclick="switchTab(this,'tab-history');loadHistory()">Call History</button>
       <button class="tab" onclick="switchTab(this,'tab-wavfiles')">WAV Files</button>
+      <button class="tab" onclick="switchTab(this,'tab-livetranscript')">Live Transcript</button>
 
+    </div>
+
+    <div id="tab-livetranscript" class="tab-content">
+      <div style="display:flex;gap:6px;margin-bottom:12px;align-items:center;">
+        <span class="section-title" style="margin-bottom:0;">Live Transcript</span>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="clearLiveTranscript()">Clear</button>
+      </div>
+      <div id="live-transcript-body" style="font-size:12px;line-height:1.6;color:var(--text-main);">
+        <div class="empty-state" id="live-transcript-empty">No active call — live transcript appears here during a call</div>
+      </div>
     </div>
 
     <div id="tab-wavfiles" class="tab-content">
@@ -1600,6 +1667,7 @@ function handleWSMessage({ type, data }) {
 
 function applyState(s) {
   state = s;
+  document.getElementById('unreg-box').style.display = s.registered ? 'none' : '';
   if (s.registered) {
     setHeaderBadge('reg-badge','reg-live');
     setLabel('reg-label', s.config ? `${s.config.username}@${s.config.server}` : 'Registered');
@@ -1627,6 +1695,7 @@ function onRegistered(data) {
   addLog('info',`Registered: ${data.displayName} <${data.username}@${data.server}>`);
   document.getElementById('btn-register').disabled   = true;
   document.getElementById('btn-unregister').disabled = false;
+  document.getElementById('unreg-box').style.display = 'none';
   lockRegForm({ username: data.username, server: data.server, displayName: data.displayName });
 }
 
@@ -1636,8 +1705,16 @@ function onUnregistered() {
   setLabel('reg-label','Unregistered');
   document.getElementById('btn-register').disabled   = false;
   document.getElementById('btn-unregister').disabled = true;
+  document.getElementById('unreg-box').style.display = '';
   unlockRegForm();
   addLog('info','Unregistered');
+}
+
+function toggleUnregAdvanced() {
+  const box   = document.getElementById('unreg-advanced');
+  const shown = box.style.display !== 'none';
+  box.style.display = shown ? 'none' : 'grid';
+  document.getElementById('unreg-advanced-toggle').textContent = shown ? 'Advanced ▾' : 'Advanced ▴';
 }
 
 function onIncomingCall(data) {
@@ -1669,7 +1746,7 @@ function onCallConnected(data) {
   document.getElementById('btn-hangup').style.display = '';
   document.getElementById('call-status-label').textContent = 'Active Call';
   addLog('info','Call connected');
-  showLiveTranscript();
+  resetLiveTranscript('Waiting for speech…');
 }
 
 function onCallEnded(data) {
@@ -1684,7 +1761,6 @@ function onCallEnded(data) {
   setLabel('call-label','Idle');
   onConfEnded();
   addLog('info',`Call ended${data.cause ? ': '+data.cause : ''}`);
-  hideLiveTranscript();
   setTimeout(loadHistory, 1500);
 }
 
@@ -1738,6 +1814,10 @@ async function doUnregister() { await api('POST','/api/unregister'); }
 async function doCall() {
   const target = document.getElementById('dial-target').value.trim();
   if (!target) return;
+  if (!state.registered && !target.includes('@')) {
+    addLog('error','Not registered — enter <address>@<sipdomain> to call directly');
+    return;
+  }
   addLog('info',`Calling ${target}...`);
   document.getElementById('call-target').textContent = target;
   document.getElementById('call-status-label').textContent = 'Calling...';
@@ -1745,7 +1825,15 @@ async function doCall() {
   setHeaderBadge('call-badge-header','call-active');
   document.getElementById('btn-call').style.display   = 'none';
   document.getElementById('btn-hangup').style.display = '';
-  const r = await api('POST','/api/call',{ target });
+  const r = state.registered
+    ? await api('POST','/api/call',{ target })
+    : await api('POST','/api/call/anonymous',{
+        target,
+        displayName: document.getElementById('unreg-callerid').value.trim() || undefined,
+        transport:   document.getElementById('unreg-transport').value,
+        wsPort:      document.getElementById('unreg-wsport').value ? parseInt(document.getElementById('unreg-wsport').value, 10) : undefined,
+        wsPath:      document.getElementById('unreg-wspath').value.trim() || undefined,
+      });
   if (r.error) { addLog('error',r.error); resetCallUI(); }
 }
 
@@ -2135,6 +2223,10 @@ async function clearHistory() {
 // ─── Log toggle ───────────────────────────────────────────────────────────────
 let logCount = 0;
 
+function toggleApiRef() {
+  document.getElementById('api-ref').classList.toggle('collapsed');
+}
+
 function toggleLog() {
   const panel = document.getElementById('log-panel');
   panel.classList.toggle('collapsed');
@@ -2406,6 +2498,22 @@ function toggleTheme() {
   applyTheme(cur === 'dark' ? 'light' : 'dark');
 }
 
+// ─── Side panel visibility (registration + captures/history) ──────────────────
+function applySidePanelsCollapsed(hidden) {
+  document.querySelector('main').classList.toggle('side-panels-collapsed', hidden);
+  const btn = document.getElementById('side-panels-toggle');
+  if (btn) {
+    btn.style.opacity = hidden ? '0.5' : '1';
+    btn.title = hidden ? 'Show side panels' : 'Hide side panels';
+  }
+  localStorage.setItem('sip-side-panels-hidden', hidden ? '1' : '0');
+}
+
+function toggleSidePanels() {
+  const hidden = !document.querySelector('main').classList.contains('side-panels-collapsed');
+  applySidePanelsCollapsed(hidden);
+}
+
 // ─── Remote hold ───────────────────────────────────────────────────────────────
 function onRemoteHold(data) {
   setBadge('remote-hold', '⏸ Remote Hold');
@@ -2460,22 +2568,19 @@ function onRecordingStopped(data) {
   setTimeout(loadHistory, 800);
 }
 
-// ─── Live transcript panel ────────────────────────────────────────────────────
-function showLiveTranscript() {
-  const sec = document.getElementById('live-transcript-section');
-  if (sec) sec.style.display = '';
-}
-function hideLiveTranscript() {
-  const sec = document.getElementById('live-transcript-section');
-  if (sec) sec.style.display = 'none';
+// ─── Live transcript tab ───────────────────────────────────────────────────────
+function resetLiveTranscript(placeholder) {
+  const body = document.getElementById('live-transcript-body');
+  if (body) body.innerHTML = `<div class="empty-state" id="live-transcript-empty">${placeholder}</div>`;
 }
 function clearLiveTranscript() {
-  const body = document.getElementById('live-transcript-body');
-  if (body) body.innerHTML = '';
+  resetLiveTranscript('No active call — live transcript appears here during a call');
 }
 function onTranscriptChunk(data) {
   const body = document.getElementById('live-transcript-body');
   if (!body) return;
+  const empty = document.getElementById('live-transcript-empty');
+  if (empty) empty.remove();
   const text = data.text || '';
   const line = document.createElement('div');
   line.className = 'lt-line';
@@ -2877,6 +2982,7 @@ function _capStopAudio(idx) {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 applyTheme(localStorage.getItem('sip-theme') || 'light');
+applySidePanelsCollapsed(localStorage.getItem('sip-side-panels-hidden') === '1');
 connectWS();
 addLog('info','SIP Endpoint UI initialised');
 loadHistory();
