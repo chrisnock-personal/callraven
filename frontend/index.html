@@ -1671,7 +1671,7 @@
       <div style="display:flex;gap:6px;margin-bottom:12px;align-items:center;">
         <button class="btn btn-ghost btn-sm" onclick="loadHistory()" title="Refresh">↻ Refresh</button>
         <a href="/api/history/export" download class="btn btn-ghost btn-sm" style="text-decoration:none;">↓ CSV</a>
-        <button class="btn btn-ghost btn-sm" style="color:var(--red);margin-left:auto;" onclick="clearHistory()">✕ Clear</button>
+        <button class="btn btn-ghost btn-sm" id="btn-clear-history" style="color:var(--red);margin-left:auto;" onclick="clearHistory()">✕ Clear</button>
       </div>
       <div id="history-list"><div class="empty-state">No call history yet</div></div>
     </div>
@@ -2293,8 +2293,28 @@ async function loadHistory() {
 }
 
 
+// Two-click confirm instead of window.confirm() — some browsers let users
+// permanently suppress native dialogs on a page ("prevent this page from
+// creating additional dialogs"), which makes confirm() return false silently
+// with no visible popup at all, so Clear looks broken with no way to fix it
+// from the page itself.
+let clearHistoryArmed  = false;
+let clearHistoryResetT = null;
+
 async function clearHistory() {
-  if (!confirm('Clear all call history?')) return;
+  const btn = document.getElementById('btn-clear-history');
+  if (!clearHistoryArmed) {
+    clearHistoryArmed = true;
+    btn.textContent = 'Confirm clear?';
+    clearHistoryResetT = setTimeout(() => {
+      clearHistoryArmed = false;
+      btn.textContent = '✕ Clear';
+    }, 3000);
+    return;
+  }
+  clearTimeout(clearHistoryResetT);
+  clearHistoryArmed = false;
+  btn.textContent = '✕ Clear';
   await api('DELETE','/api/history');
   loadHistory();
 }
