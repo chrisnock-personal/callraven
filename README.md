@@ -2,7 +2,7 @@
 
 # SIP Endpoint — Containerized Web Softphone
 
-A fully containerized SIP softphone with a web UI, complete REST API for headless operation, SIP over WebSocket **or raw UDP** (no WS transport module required on the PBX), calling without ever registering, per-call packet capture (INVITE/100/180/200/ACK/BYE + RTP), dual-channel (remote/local) call recording, WAV file playback into the RTP stream, live audio relay to the browser, on-demand call recording (with an auto-record option), and on-device Whisper transcription with speaker diarization — both live during a call and post-call on demand. Automatic pcap capture and live transcription can each be toggled off if not needed.
+A fully containerized SIP softphone with a web UI, complete REST API for headless operation, SIP over WebSocket or UDP (no WS transport module required on the PBX, TCP support not yet implemented), calling with or without SIP registration, per-call packet capture (INVITE/100/180/200/ACK/BYE + RTP), dual-channel (remote/local) call recording, WAV file playback into the RTP stream, live audio relay to the browser, on-demand call recording (with an auto-record option), and on-device Whisper transcription with speaker diarization — both live during a call and post-call on demand. Automatic pcap capture and live transcription can each be toggled off if not needed.
 
 ---
 
