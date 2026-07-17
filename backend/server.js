@@ -219,6 +219,20 @@ app.post('/api/call', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.post('/api/call/anonymous', async (req, res) => {
+  const { target, displayName, wsPort, wsPath, transport, port } = req.body;
+  if (!target) return res.status(400).json({ error: 'target is required' });
+  const state = sipManager.getState();
+  if (state.registered) return res.status(409).json({ error: 'Already registered — use the normal dial instead' });
+  if (state.activeCall)  return res.status(409).json({ error: 'Call already active' });
+  try {
+    const callId = uuidv4();
+    captureManager.startCapture(callId);
+    const result = await sipManager.makeUnregisteredCall(target, callId, { displayName, wsPort, wsPath, transport, port });
+    res.json({ success: true, callId, ...result });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/answer', async (req, res) => {
   const state = sipManager.getState();
   if (!state.incomingCall) return res.status(409).json({ error: 'No incoming call' });
