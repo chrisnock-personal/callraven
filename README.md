@@ -424,6 +424,14 @@ The layout adapts at 1100px (right panel drops below) and 768px (single column).
 
 ---
 
+## Roadmap
+
+- [x] **Unregistered calling** — allow placing a call without an active SIP registration by entering `<address>@<sipdomain>` directly
+- [ ] **Collapsible captures/history panel** — toggle to hide/show the captures and call history panel to reclaim screen space
+- [ ] **Vanilla SIP transport** — support raw SIP over UDP/TCP (not just SIP-over-WebSocket via JsSIP) to interoperate with PBXs/endpoints that don't offer a WS transport
+
+---
+
 ## Headless / Automation Usage
 
 The REST API is fully usable without the browser UI:

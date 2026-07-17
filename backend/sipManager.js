@@ -733,103 +733,7 @@ class SipManager extends EventEmitter {
         this._log('info', `WebSocket connected to ${wsUri}`);
         // Hook WS message stream to capture 200 OK responses
         // (JsSIP doesn't expose 200 OK on session events for outbound calls)
-        setTimeout(() => {
-          try {
-            const transport = this.ua?._transport;
-            const ws = transport?._ws || transport?.ws || transport?._socket;
-
-            // Diagnostic: log what we find
-            // transport.socket is JsSIP's WebSocketInterface
-            // transport.ondata is the callback JsSIP fires for every inbound message
-            if (transport._ok200hooked) return;
-
-            const handleSipResponse = (text) => {
-              if (!text || !text.startsWith('SIP/2.0')) return;
-              const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
-              if (firstLine.includes(' 180 ')) return; // captured via progress event
-              const callId = this._pendingCallId || this.activeCall?.callId;
-              if (!callId) return;
-              captureManager.writeSipMessage(callId, this.config?.server || '', 5060, getLocalIp(), 5060, text);
-              this._log('info', `[CAP] Inbound SIP: ${firstLine}`);
-            };
-
-            // Hook transport.ondata — JsSIP calls this for every inbound WS message
-            if (typeof transport.ondata === 'function') {
-              const origOnData = transport.ondata.bind(transport);
-              transport.ondata = (transport_ref, url, msg, binary) => {
-                origOnData(transport_ref, url, msg, binary);
-                const text = typeof msg === 'string' ? msg
-                           : Buffer.isBuffer(msg) ? msg.toString('utf8') : null;
-                if (text) handleSipResponse(text);
-              };
-              transport._ok200hooked = true;
-              this._log('info', '[CAP] Hooked via transport.ondata');
-            }
-
-            // Also try the raw socket inside WebSocketInterface
-            const rawWs = transport.socket?._ws
-                       || transport.socket?.ws
-                       || transport.socket?._socket
-                       || transport.socket?.socket;
-            if (rawWs && typeof rawWs.on === 'function' && !rawWs._ok200hooked) {
-              rawWs.on('message', (data) => {
-                const text = typeof data === 'string' ? data
-                           : Buffer.isBuffer(data) ? data.toString('utf8') : null;
-                if (text) handleSipResponse(text);
-              });
-              rawWs._ok200hooked = true;
-              this._log('info', '[CAP] Hooked via transport.socket raw WS');
-            }
-
-            if (!transport._ok200hooked) {
-              this._log('warn', '[CAP] Could not hook inbound SIP — 100/200 will be missing from pcap');
-            }
-
-            if (!ws) return;
-            if (ws._ok200hooked) { this._log('info', '[CAP] Already hooked'); return; }
-
-            const handleMsg = (data) => {
-              const text = typeof data === 'string' ? data
-                         : Buffer.isBuffer(data)   ? data.toString('utf8')
-                         : typeof data?.toString === 'function' ? data.toString() : null;
-              if (!text || !text.startsWith('SIP/2.0')) return;
-              const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
-              if (firstLine.includes(' 180 ')) return; // skip 180, captured via progress
-              const callId = this._pendingCallId || this.activeCall?.callId;
-              if (!callId) return;
-              const localIp = getLocalIp();
-              captureManager.writeSipMessage(callId, this.config?.server || '', 5060, localIp, 5060, text);
-              this._log('info', `[CAP] WS response: ${firstLine}`);
-            };
-
-            // Try all listener attachment methods
-            let attached = false;
-            if (typeof ws.on === 'function') {
-              ws.on('message', handleMsg);
-              attached = true;
-              this._log('info', '[CAP] Hooked via ws.on(message)');
-            }
-            if (!attached && typeof ws.addEventListener === 'function') {
-              ws.addEventListener('message', (evt) => handleMsg(evt.data));
-              attached = true;
-              this._log('info', '[CAP] Hooked via ws.addEventListener(message)');
-            }
-            if (!attached) {
-              // Wrap onmessage as last resort
-              const orig = ws.onmessage;
-              ws.onmessage = (evt) => {
-                if (orig) orig.call(ws, evt);
-                handleMsg(evt?.data || evt);
-              };
-              attached = true;
-              this._log('info', '[CAP] Hooked via ws.onmessage wrap');
-            }
-
-            if (attached) ws._ok200hooked = true;
-          } catch(e) {
-            this._log('warn', `[CAP] Hook failed: ${e.message}\n${e.stack}`);
-          }
-        }, 200);
+        this._hookTransportCapture();
       });
       this.ua.on('disconnected', (e) => this._log('warn', `WebSocket disconnected: ${e?.cause || ''}`));
       this.ua.on('newRTCSession', (data) => this._handleNewSession(data.session));
@@ -837,6 +741,181 @@ class SipManager extends EventEmitter {
       this.ua.start();
       setTimeout(() => { if (!this.registered) reject(new Error('Registration timeout after 30s')); }, 30000);
     });
+  }
+
+  // ── WS transport capture hook ─────────────────────────────────────────────
+  // Hooks the raw WebSocket message stream so 100/200 responses (which JsSIP
+  // doesn't expose on session events for outbound calls) still make it into
+  // the pcap. Shared by both the registered UA and ad-hoc unregistered UAs.
+  _hookTransportCapture() {
+    setTimeout(() => {
+      try {
+        const transport = this.ua?._transport;
+        const ws = transport?._ws || transport?.ws || transport?._socket;
+        if (!transport || transport._ok200hooked) return;
+
+        const handleSipResponse = (text) => {
+          if (!text || !text.startsWith('SIP/2.0')) return;
+          const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
+          if (firstLine.includes(' 180 ')) return; // captured via progress event
+          const callId = this._pendingCallId || this.activeCall?.callId;
+          if (!callId) return;
+          captureManager.writeSipMessage(callId, this.config?.server || '', 5060, getLocalIp(), 5060, text);
+          this._log('info', `[CAP] Inbound SIP: ${firstLine}`);
+        };
+
+        // Hook transport.ondata — JsSIP calls this for every inbound WS message
+        if (typeof transport.ondata === 'function') {
+          const origOnData = transport.ondata.bind(transport);
+          transport.ondata = (transport_ref, url, msg, binary) => {
+            origOnData(transport_ref, url, msg, binary);
+            const text = typeof msg === 'string' ? msg
+                       : Buffer.isBuffer(msg) ? msg.toString('utf8') : null;
+            if (text) handleSipResponse(text);
+          };
+          transport._ok200hooked = true;
+          this._log('info', '[CAP] Hooked via transport.ondata');
+        }
+
+        // Also try the raw socket inside WebSocketInterface
+        const rawWs = transport.socket?._ws
+                   || transport.socket?.ws
+                   || transport.socket?._socket
+                   || transport.socket?.socket;
+        if (rawWs && typeof rawWs.on === 'function' && !rawWs._ok200hooked) {
+          rawWs.on('message', (data) => {
+            const text = typeof data === 'string' ? data
+                       : Buffer.isBuffer(data) ? data.toString('utf8') : null;
+            if (text) handleSipResponse(text);
+          });
+          rawWs._ok200hooked = true;
+          this._log('info', '[CAP] Hooked via transport.socket raw WS');
+        }
+
+        if (!transport._ok200hooked) {
+          this._log('warn', '[CAP] Could not hook inbound SIP — 100/200 will be missing from pcap');
+        }
+
+        if (!ws) return;
+        if (ws._ok200hooked) { this._log('info', '[CAP] Already hooked'); return; }
+
+        const handleMsg = (data) => {
+          const text = typeof data === 'string' ? data
+                     : Buffer.isBuffer(data)   ? data.toString('utf8')
+                     : typeof data?.toString === 'function' ? data.toString() : null;
+          if (!text || !text.startsWith('SIP/2.0')) return;
+          const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
+          if (firstLine.includes(' 180 ')) return; // skip 180, captured via progress
+          const callId = this._pendingCallId || this.activeCall?.callId;
+          if (!callId) return;
+          const localIp = getLocalIp();
+          captureManager.writeSipMessage(callId, this.config?.server || '', 5060, localIp, 5060, text);
+          this._log('info', `[CAP] WS response: ${firstLine}`);
+        };
+
+        // Try all listener attachment methods
+        let attached = false;
+        if (typeof ws.on === 'function') {
+          ws.on('message', handleMsg);
+          attached = true;
+          this._log('info', '[CAP] Hooked via ws.on(message)');
+        }
+        if (!attached && typeof ws.addEventListener === 'function') {
+          ws.addEventListener('message', (evt) => handleMsg(evt.data));
+          attached = true;
+          this._log('info', '[CAP] Hooked via ws.addEventListener(message)');
+        }
+        if (!attached) {
+          // Wrap onmessage as last resort
+          const orig = ws.onmessage;
+          ws.onmessage = (evt) => {
+            if (orig) orig.call(ws, evt);
+            handleMsg(evt?.data || evt);
+          };
+          attached = true;
+          this._log('info', '[CAP] Hooked via ws.onmessage wrap');
+        }
+
+        if (attached) ws._ok200hooked = true;
+      } catch(e) {
+        this._log('warn', `[CAP] Hook failed: ${e.message}\n${e.stack}`);
+      }
+    }, 200);
+  }
+
+  // ── Unregistered (ad-hoc) call ────────────────────────────────────────────
+  // Places a call without an active SIP registration by connecting a throwaway
+  // UA directly to the target's SIP domain over SIP-over-WebSocket. There's no
+  // account to register — the "identity" is just a caller-ID string presented
+  // in the From header. Only usable while not registered and idle.
+  makeUnregisteredCall(target, callId, opts = {}) {
+    return new Promise((resolve, reject) => {
+      if (this.registered) return reject(new Error('Already registered — use the normal dial instead'));
+      if (this.activeCall)  return reject(new Error('Call already active'));
+
+      const stripped = target.replace(/^sips?:/i, '');
+      const at = stripped.lastIndexOf('@');
+      if (at === -1) return reject(new Error('Target must be in the form <address>@<sipdomain> for an unregistered call'));
+      const domain = stripped.slice(at + 1).split(';')[0].trim();
+      if (!domain) return reject(new Error('Missing SIP domain after @'));
+
+      const transport  = opts.transport === 'TLS' ? 'TLS' : 'UDP';
+      const wsProto     = transport === 'TLS' ? 'wss' : 'ws';
+      const sipProto    = transport === 'TLS' ? 'sips' : 'sip';
+      const wsPort      = opts.wsPort || (transport === 'TLS' ? 8089 : 8088);
+      const wsPath      = opts.wsPath || '/ws';
+      const wsUri       = `${wsProto}://${domain}:${wsPort}${wsPath}`;
+      const displayName = (opts.displayName || '').trim() || 'anonymous';
+      const localUser   = displayName.replace(/[^A-Za-z0-9._-]/g, '') || 'anonymous';
+      const targetUri    = `${sipProto}:${stripped}`;
+
+      if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
+      this._log('info', `Unregistered call — connecting to ${wsUri}`);
+      const socket = new JsSIP.WebSocketInterface(wsUri);
+      this.ua = new JsSIP.UA({
+        sockets: [socket], uri: `${sipProto}:${localUser}@${domain}`,
+        display_name: displayName, register: false, user_agent: 'SIPEndpoint/1.0',
+        log: { builtinEnabled: false, level: 'warn',
+          connector: (level, category, label, content) => {
+            if (level === 'warn' || level === 'error') this._log(level, `[${category}] ${content}`);
+          }
+        }
+      });
+      this.config = { server: domain, username: localUser, displayName, transport, wsPort, wsPath };
+      this._anonymousUa = true;
+
+      let settled = false;
+      this.ua.on('connected', () => {
+        this._log('info', `WebSocket connected to ${wsUri}`);
+        this._hookTransportCapture();
+        if (settled) return;
+        settled = true;
+        this._dialOut(targetUri, callId).then(resolve).catch(err => {
+          this._teardownAnonymousUa();
+          reject(err);
+        });
+      });
+      this.ua.on('disconnected', (e) => this._log('warn', `WebSocket disconnected: ${e?.cause || ''}`));
+      this.ua.on('newRTCSession', (data) => this._handleNewSession(data.session));
+
+      this.ua.start();
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          this._teardownAnonymousUa();
+          reject(new Error('Connection timeout after 15s'));
+        }
+      }, 15000);
+    });
+  }
+
+  _teardownAnonymousUa() {
+    if (this._anonymousUa && this.ua) {
+      try { this.ua.stop(); } catch (e) {}
+      this.ua = null;
+      this.config = null;
+    }
+    this._anonymousUa = false;
   }
 
   // ── SIP capture via JsSIP session events ─────────────────────────────────
@@ -1123,6 +1202,7 @@ class SipManager extends EventEmitter {
     this.activeCall     = null;
     this.incomingCall   = null;
     this._pendingCallId = null;
+    this._teardownAnonymousUa();
   }
 
   // ── Unregister ───────────────────────────────────────────────────────────
@@ -1146,11 +1226,17 @@ class SipManager extends EventEmitter {
 
   // ── Outbound call ─────────────────────────────────────────────────────────
   makeCall(target, callId) {
+    if (!this.ua || !this.registered) return Promise.reject(new Error('Not registered'));
+    let targetUri = target;
+    if (!target.startsWith('sip:') && !target.startsWith('sips:'))
+      targetUri = target.includes('@') ? `sip:${target}` : `sip:${target}@${this.config.server}`;
+    return this._dialOut(targetUri, callId);
+  }
+
+  // Places the INVITE on the current UA and records call bookkeeping.
+  // Shared by makeCall() (registered dial) and makeUnregisteredCall() (ad-hoc dial).
+  _dialOut(targetUri, callId) {
     return new Promise((resolve, reject) => {
-      if (!this.ua || !this.registered) return reject(new Error('Not registered'));
-      let targetUri = target;
-      if (!target.startsWith('sip:') && !target.startsWith('sips:'))
-        targetUri = target.includes('@') ? `sip:${target}` : `sip:${target}@${this.config.server}`;
       const localIp = getLocalIp();
       const rtpPort = allocateRtpPort();
       const sdp     = buildSdp(localIp, rtpPort);
