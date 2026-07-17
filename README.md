@@ -2,7 +2,7 @@
 
 # SIP Endpoint — Containerized Web Softphone
 
-A fully containerized SIP softphone with a web UI, complete REST API for headless operation, per-call packet capture (INVITE/100/180/200/ACK/BYE + RTP), dual-channel (remote/local) call recording, WAV file playback into the RTP stream, live audio relay to the browser, on-demand call recording, and on-device Whisper transcription with speaker diarization — both live during a call and post-call on demand.
+A fully containerized SIP softphone with a web UI, complete REST API for headless operation, SIP over WebSocket **or raw UDP** (no WS transport module required on the PBX), calling without ever registering, per-call packet capture (INVITE/100/180/200/ACK/BYE + RTP), dual-channel (remote/local) call recording, WAV file playback into the RTP stream, live audio relay to the browser, on-demand call recording (with an auto-record option), and on-device Whisper transcription with speaker diarization — both live during a call and post-call on demand. Automatic pcap capture and live transcription can each be toggled off if not needed.
 
 ---
 
@@ -43,7 +43,7 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 │  │  Dark/light mode · Responsive    │                              │
 │  └───────────────────────────────────┘                             │
 └──────────────────────────────────────────────────────────────────┘
-         │ SIP over WebSocket          │ UDP RTP
+         │ SIP over WebSocket or UDP   │ UDP RTP
          ▼                             ▼
     SIP Proxy / PBX              RTP Media Stream
    (Asterisk, FreePBX,           (G.722, PCMU, PCMA)
@@ -56,6 +56,7 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 |---|---|
 | `backend/server.js` | Express HTTP/WS server, REST API endpoints, WebSocket hub (control/audio/transcript), audio + transcript fan-out |
 | `backend/sipManager.js` | JsSIP UA, call state machine, RTP bridge, raw re-INVITE hold, WAV playback, keepalive, IP-change re-registration |
+| `backend/udpSipSocket.js` | Raw UDP `Socket` implementation for JsSIP (`transport: 'UDP-RAW'`), with its own RFC 3261-style retransmission |
 | `backend/captureManager.js` | Per-call `.pcap` writer (pure Node.js, no tcpdump) |
 | `backend/audioDecoder.js` | G.722/PCMU/PCMA decoder, dual-channel (rx/tx) call WAV recorder |
 | `backend/callHistory.js` | Persistent call history (JSON + CSV export) |
@@ -133,7 +134,7 @@ volumes:
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3000` | HTTP/WebSocket server port |
-| `SIP_PORT` | `5060` | Used only for the pcap BPF capture filter |
+| `SIP_PORT` | `5060` | pcap BPF capture filter, and the local bind port for the raw-UDP SIP transport (`UDP-RAW`) |
 | `RTP_PORT_LOW` | `10000` | RTP UDP port pool start |
 | `RTP_PORT_HIGH` | `20000` | RTP UDP port pool end |
 | `CAPTURE_INTERFACE` | `any` | libpcap capture interface |
@@ -170,15 +171,37 @@ POST /api/register
 }
 ```
 
+**Transport values:** `UDP` (default, SIP over plaintext WebSocket — `ws://`), `TLS` (SIP over WebSocket Secure — `wss://`), or `UDP-RAW` (raw SIP over UDP, no WebSocket — see [Raw UDP SIP Transport](#raw-udp-sip-transport) below). `wsPort`/`wsPath` apply to `UDP`/`TLS` only; `port` is the real destination UDP port for `UDP-RAW` (default `5060`).
+
+### Raw UDP SIP Transport
+
+Select **"UDP (raw, no WS)"** as the Transport to register and place calls over plain SIP-over-UDP — no WebSocket transport module required on the PBX side (works against a stock Asterisk/FreePBX/Kamailio `udp` binding on port 5060). The Transport dropdown hides the WebSocket-only fields (WS Port) when this option is selected, since the existing `Port` field becomes the real destination UDP port instead.
+
+Implemented in `backend/udpSipSocket.js` as a custom JsSIP `Socket` — dialogs, digest authentication, REGISTER refresh, hold, transfer, conference, and DTMF are all unchanged from the WebSocket path (JsSIP's transaction/dialog layer is transport-agnostic). The one thing plugged in on top is retransmission: unlike SIP-over-WebSocket, UDP can drop packets, so `udpSipSocket.js` retransmits unacknowledged requests and final responses (doubling interval, ~32s timeout) — JsSIP itself doesn't do this for any transport.
+
+`SIP_PORT` (default `5060`) sets the local UDP port this transport binds to, in addition to its existing use as the pcap BPF filter port.
+
+Unregistered calling (below) also supports `UDP-RAW` via the same `transport` field.
+
+### Settings
+
+Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` default to `true`, matching the prior always-on behaviour; `autoRecordEnabled` defaults to `false`, since on-demand recording has always been opt-in. Changes take effect on the next call.
+
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| `GET` | `/api/settings` | — | Current settings: `{captureEnabled, liveTranscriptEnabled, autoRecordEnabled}` |
+| `POST` | `/api/settings` | `{captureEnabled?, liveTranscriptEnabled?, autoRecordEnabled?}` | Update one or more settings |
+
 ### Calls
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
-| `POST` | `/api/call` | `{target}` | Initiate outbound call. Starts pcap capture automatically. |
-| `POST` | `/api/answer` | — | Answer incoming call. Starts capture automatically. |
+| `POST` | `/api/call` | `{target}` | Initiate outbound call while registered. Starts pcap capture automatically (unless disabled in Settings). |
+| `POST` | `/api/call/anonymous` | `{target, displayName?, transport?, port?, wsPort?, wsPath?}` | Place a call **without** an active registration — see Unregistered Calling below. Only usable while unregistered and idle. |
+| `POST` | `/api/answer` | — | Answer incoming call. Starts capture automatically (unless disabled in Settings). |
 | `POST` | `/api/hangup` | — | End active call. Sends BYE or CANCEL (pre-answer). Finalises capture. |
 | `POST` | `/api/reject` | — | Reject incoming call (SIP 603 Decline) |
-| `POST` | `/api/dtmf` | `{digit}` | Send DTMF tone (0–9, *, #) via RFC 2833 |
+| `POST` | `/api/dtmf` | `{digit}` | Send DTMF tone (0–9, *, #) via SIP INFO |
 
 **Call target formats:**
 ```
@@ -188,6 +211,21 @@ POST /api/register
 ```
 
 **CANCEL behaviour:** If `/api/hangup` is called before the call is answered (status `calling` or `ringing`), a SIP CANCEL is sent and the history entry is marked `cancelled`.
+
+### Unregistered Calling
+
+Places a call without ever registering, by connecting a throwaway UA directly to the target's SIP domain — there's no account, just a caller-ID string presented in the From header. Only usable while not registered and idle (returns 409 otherwise).
+
+The target **must** be in the form `<address>@<sipdomain>` (a bare extension isn't resolvable without a registered server to fall back to). In the UI, this happens automatically: typing an `@`-containing address into the dial box while unregistered calls `/api/call/anonymous` instead of `/api/call`; an **Advanced** panel exposes `displayName` (caller ID, default `anonymous`), `transport` (`UDP`/`TLS`/`UDP-RAW`), `port`, `wsPort`, and `wsPath`.
+
+```json
+POST /api/call/anonymous
+{
+  "target": "alice@pbx.example.com",
+  "displayName": "Front Desk",
+  "transport": "UDP-RAW"
+}
+```
 
 ### Hold & Resume
 
@@ -300,6 +338,10 @@ History entries have a `status` field:
 | `GET` | `/api/history` | Full call history as JSON |
 | `GET` | `/api/history/export` | Download as CSV |
 | `DELETE` | `/api/history` | Clear all history |
+| `DELETE` | `/api/history/:callId` | Delete one history entry, plus its pcap, recording, and transcript files |
+| `DELETE` | `/api/history/:callId/capture` | Delete only the pcap + WAV recording for an entry, keep the history entry and transcript |
+
+(See [Transcription](#transcription) below for `DELETE /api/history/:callId/transcript`.)
 
 History is persisted to `/captures/call_history.json` and survives container restarts.
 
@@ -410,25 +452,46 @@ Click **🔊 Listen** during a call to hear the inbound audio stream in the brow
 ### RTP Stats Panel
 Appears automatically when a call connects. Displays codec, RX/TX packet counts, packet loss %, jitter (ms), and RX/TX kbps. Updated every 2 seconds via `GET /api/stats`.
 
-### Live Transcript Panel
-Shows recognised speech in real time during an active call (when Whisper is available in the build), streamed over the `/transcript` WebSocket.
+### Live Transcript Tab
+A **Live Transcript** tab in the right panel (alongside Call History and WAV Files) shows recognised speech in real time during an active call (when Whisper is available in the build), streamed over the `/transcript` WebSocket. It resets to "Waiting for speech…" when a call connects, and the last transcript stays visible after the call ends so it can still be read. Disable via the **Live transcript** toggle in Settings (left panel).
 
 ### Transcripts Tab
 Lists all post-call transcripts. Recordings in the Captures tab can be transcribed on demand with the ✍ **Transcribe** button; diarized transcripts label each line **Remote**/**Local**. Transcripts can be copied, downloaded as text, or deleted independently of the underlying recording.
+
+### Unregistered Calling
+Type an `address@sipdomain` target into the dial box while unregistered and hit Call — no registration required. An **Advanced** panel exposes caller ID, transport, and port overrides. See [Unregistered Calling](#unregistered-calling) in the API reference.
+
+### Settings Toggles
+Three switches in the left panel control per-call automatic behaviour: **Auto-capture (pcap)**, **Live transcript**, and **Auto-record** (all backed by `GET`/`POST /api/settings`). Auto-capture and live transcript default on (matching the original always-on behaviour); auto-record defaults off, since on-demand recording has always been a manual Start/Stop action.
+
+### Collapsible Side Panels
+The ▤ button in the header hides/shows both the left (SIP Registration) and right (Captures/History/Transcript) panels at once, leaving just the center dialer — useful to reclaim screen space. Preference is persisted to `localStorage`.
+
+### Collapsible API Reference
+The API endpoint reference in the left panel is collapsed by default (click to expand) to keep the registration form the focus.
+
+### System Log
+An inline log panel below the dialer, collapsed by default to save screen space — click the header to expand it. Shows a badge with the count of new entries while collapsed.
 
 ### Registration Form Lock
 When registered, the SIP registration form locks and displays the active credentials. Fields populate automatically from server state on page reload — even if registration was done via the API.
 
 ### Mobile Responsive
-The layout adapts at 1100px (right panel drops below) and 768px (single column). Functional on tablets and large phone screens.
+The layout adapts at 1100px (right panel drops below) and 768px (single column). Functional on tablets and large phone screens. The center dialer panel is capped at a comfortable max-width on wide desktop screens rather than stretching edge-to-edge.
 
 ---
 
 ## Roadmap
 
 - [x] **Unregistered calling** — allow placing a call without an active SIP registration by entering `<address>@<sipdomain>` directly
-- [ ] **Collapsible captures/history panel** — toggle to hide/show the captures and call history panel to reclaim screen space
-- [ ] **Vanilla SIP transport** — support raw SIP over UDP/TCP (not just SIP-over-WebSocket via JsSIP) to interoperate with PBXs/endpoints that don't offer a WS transport
+- [x] **Collapsible side panels** — toggle in the header to hide/show both the SIP Registration panel and the Captures/History/Transcript panel at once, to reclaim screen space
+- [x] **Vanilla SIP transport** — support raw SIP over UDP (not just SIP-over-WebSocket via JsSIP) to interoperate with PBXs/endpoints that don't offer a WS transport. Select "UDP (raw, no WS)" as the Transport. TCP is not implemented.
+- [ ] **Vanilla TCP SIP support** — extend the raw SIP transport (`udpSipSocket.js`) to also support TCP, alongside the existing raw UDP option
+- [ ] **Secure SIP (SIPS/TLS)** — support SIP over TLS for the raw transport (encrypted signaling to the PBX directly, distinct from the existing WSS option which is TLS at the WebSocket layer only)
+- [x] **Configurable pcap capture** — toggle in the left panel (`GET`/`POST /api/settings`, `captureEnabled`) to disable automatic pcap capture on calls
+- [x] **Configurable live transcript** — toggle in the left panel (`GET`/`POST /api/settings`, `liveTranscriptEnabled`) to disable automatic live transcription on calls
+- [x] **Auto-record option** — toggle in the left panel (`autoRecordEnabled` via `/api/settings`) to automatically start on-demand recording when a call connects, instead of requiring a manual click each time
+- [ ] **Non-containerized native client ports** — native Linux build (Rust), native macOS build, and native Windows build, as alternatives to running in a container
 
 ---
 
@@ -498,7 +561,7 @@ curl -O $BASE/api/transcripts/rec_<callid>_<ts>_rx.wav/text
 | G.722 | 9 | Send + Receive | Preferred. 16kHz wideband ADPCM. WAV files converted to G.722 at upload. |
 | PCMU (G.711 μ-law) | 0 | Send + Receive | 8kHz narrowband. Fallback. |
 | PCMA (G.711 A-law) | 8 | Send + Receive | 8kHz narrowband. Fallback. |
-| telephone-event | 101 | Send | DTMF via RFC 2833 |
+| telephone-event | 101 | Advertised only | Advertised in SDP for RFC 2833 capability, but `/api/dtmf` actually sends DTMF via SIP INFO (JsSIP's default) — see the Calls section below. |
 
 SDP advertises G.722 as the preferred codec. If the PBX does not support G.722, it falls back to PCMU or PCMA automatically.
 

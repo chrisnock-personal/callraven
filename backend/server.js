@@ -126,7 +126,12 @@ sipManager.on('callConnected', (d) => {
   broadcast('callConnected', d);
   // Attach audio dispatcher to new bridge
   if (sipManager.rtpBridge) sipManager.rtpBridge.onAudio = dispatchAudio;
-  // Start live transcription if whisper is available
+  // Auto-start on-demand recording if enabled (recordingStarted event handles the rest)
+  if (settings.autoRecordEnabled) {
+    sipManager.startRecording().catch(err => console.error(`[AUTO-RECORD] ${err.message}`));
+  }
+  // Start live transcription if enabled and whisper is available
+  if (!settings.liveTranscriptEnabled) return;
   if (!transcribeManager.isWhisperAvailable()) return;
   if (liveTranscriber) liveTranscriber.stop();
   liveTranscriber   = new LiveTranscriber();
@@ -175,12 +180,34 @@ captureManager.on('captureReady', (data) => {
   if (data.callId) callHistory.endCall(data.callId, { captureFile: data.url });
 });
 
+// ─── Feature toggles ────────────────────────────────────────────────────────
+// captureEnabled/liveTranscriptEnabled default on, matching prior always-on
+// behaviour. autoRecordEnabled defaults off, since on-demand recording has
+// always been opt-in per call. All are global settings, not per-call — they
+// take effect on the next call.
+const settings = {
+  captureEnabled:        true,
+  liveTranscriptEnabled: true,
+  autoRecordEnabled:     false,
+};
+
 // ─── REST API ─────────────────────────────────────────────────────────────────
 
 app.get('/api/status', (req, res) => res.json(sipManager.getState()));
 
+app.get('/api/settings', (req, res) => res.json(settings));
+
+app.post('/api/settings', (req, res) => {
+  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled } = req.body;
+  if (typeof captureEnabled === 'boolean')        settings.captureEnabled        = captureEnabled;
+  if (typeof liveTranscriptEnabled === 'boolean') settings.liveTranscriptEnabled = liveTranscriptEnabled;
+  if (typeof autoRecordEnabled === 'boolean')     settings.autoRecordEnabled     = autoRecordEnabled;
+  res.json(settings);
+});
+
 app.get('/api/transcript/status', (req, res) => res.json({
   whisperAvailable: transcribeManager.isWhisperAvailable(),
+  enabled:          settings.liveTranscriptEnabled,
   active:           !!liveTranscriber,
   windowMs:         WINDOW_MS,
   clients:          transcriptClients.size,
@@ -213,7 +240,7 @@ app.post('/api/call', async (req, res) => {
   if (state.activeCall)  return res.status(409).json({ error: 'Call already active' });
   try {
     const callId = uuidv4();
-    captureManager.startCapture(callId);
+    if (settings.captureEnabled) captureManager.startCapture(callId);
     const result = await sipManager.makeCall(target, callId);
     res.json({ success: true, callId, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -227,7 +254,7 @@ app.post('/api/call/anonymous', async (req, res) => {
   if (state.activeCall)  return res.status(409).json({ error: 'Call already active' });
   try {
     const callId = uuidv4();
-    captureManager.startCapture(callId);
+    if (settings.captureEnabled) captureManager.startCapture(callId);
     const result = await sipManager.makeUnregisteredCall(target, callId, { displayName, wsPort, wsPath, transport, port });
     res.json({ success: true, callId, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -238,7 +265,7 @@ app.post('/api/answer', async (req, res) => {
   if (!state.incomingCall) return res.status(409).json({ error: 'No incoming call' });
   try {
     const callId = uuidv4();
-    captureManager.startCapture(callId);
+    if (settings.captureEnabled) captureManager.startCapture(callId);
     const result = await sipManager.answerCall(callId);
     res.json({ success: true, callId, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -250,14 +277,16 @@ app.post('/api/hangup', async (req, res) => {
   const callId = state.activeCall.callId;
   try {
     await sipManager.hangup();
-    // Capture is stopped via callEnded event (with delay for final SIP messages)
-    // Wait briefly then get the filename for the response
-    await new Promise(r => setTimeout(r, 150));
-    const writer = captureManager.getWriter ? captureManager.getWriter(callId) : null;
-    // If still open (callEnded delay hasn't fired yet), stop it now
-    const captureFile = captureManager.stopCapture(callId) ||
-                        path.join(__dirname, '../captures',
-                          `call_${new Date().toISOString().replace(/[:.]/g, '-')}_${callId.slice(0,8)}.pcap`);
+    let captureFile = null;
+    if (settings.captureEnabled) {
+      // Capture is stopped via callEnded event (with delay for final SIP messages)
+      // Wait briefly then get the filename for the response
+      await new Promise(r => setTimeout(r, 150));
+      // If still open (callEnded delay hasn't fired yet), stop it now
+      captureFile = captureManager.stopCapture(callId) ||
+                    path.join(__dirname, '../captures',
+                      `call_${new Date().toISOString().replace(/[:.]/g, '-')}_${callId.slice(0,8)}.pcap`);
+    }
     res.json({ success: true, captureFile: captureFile ? `/captures/${path.basename(String(captureFile))}` : null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

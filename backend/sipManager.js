@@ -64,6 +64,7 @@ const WebSocket = require('ws');
 global.WebSocket = WebSocket;
 
 const JsSIP = require('jssip');
+const UdpSocketInterface = require('./udpSipSocket');
 
 // ─── RTP port pool ───────────────────────────────────────────────────────────
 const RTP_PORT_LOW  = parseInt(process.env.RTP_PORT_LOW  || '10000');
@@ -689,20 +690,42 @@ class SipManager extends EventEmitter {
     };
   }
 
+  // ── Transport socket construction ────────────────────────────────────────
+  // Builds the JsSIP Socket for a given config — either the built-in
+  // WebSocketInterface (UDP/TLS meaning ws://\/wss://, the original transport)
+  // or our own raw-UDP UdpSocketInterface (transport: 'UDP-RAW'). JsSIP's
+  // Transport layer is transport-agnostic (see udpSipSocket.js header comment)
+  // so everything else — dialogs, digest auth, REGISTER refresh, transactions —
+  // is unaffected by which one is plugged in.
+  _buildTransportSocket(config, username) {
+    if (config.transport === 'UDP-RAW') {
+      const port      = config.port || 5060;
+      const localPort = parseInt(process.env.SIP_PORT || '5060', 10);
+      const socket    = new UdpSocketInterface(config.server, port, { localPort });
+      // UDP is connectionless — unlike WS, the registrar/PBX sends inbound
+      // traffic to whatever address is in Contact, so it must be accurate.
+      // JsSIP's config checker only accepts contact_uri as a string (it parses
+      // it internally) — passing a JsSIP.URI instance directly is rejected.
+      const contactUri = `sip:${username}@${getLocalIp()}:${localPort};transport=udp`;
+      return { socket, sipProto: 'sip', connectLabel: `udp://${config.server}:${port}`, contactUri };
+    }
+    const wsProto  = config.transport === 'TLS' ? 'wss' : 'ws';
+    const sipProto = config.transport === 'TLS' ? 'sips' : 'sip';
+    const wsPort   = config.transport === 'TLS' ? (config.wsPort || 8089) : (config.wsPort || 8088);
+    const wsPath   = config.wsPath || '/ws';
+    const wsUri    = `${wsProto}://${config.server}:${wsPort}${wsPath}`;
+    return { socket: new JsSIP.WebSocketInterface(wsUri), sipProto, connectLabel: wsUri, contactUri: null };
+  }
+
   // ── Registration ─────────────────────────────────────────────────────────
   register(config) {
     return new Promise((resolve, reject) => {
       if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
       this.config = config;
-      const { server, username, password, displayName, transport } = config;
-      const wsProto  = transport === 'TLS' ? 'wss' : 'ws';
-      const sipProto = transport === 'TLS' ? 'sips' : 'sip';
-      const wsPort   = transport === 'TLS' ? (config.wsPort || 8089) : (config.wsPort || 8088);
-      const wsPath   = config.wsPath || '/ws';
-      const wsUri    = `${wsProto}://${server}:${wsPort}${wsPath}`;
-      this._log('info', `Connecting to ${wsUri}`);
-      const socket = new JsSIP.WebSocketInterface(wsUri);
-      this.ua = new JsSIP.UA({
+      const { server, username, password, displayName } = config;
+      const { socket, sipProto, connectLabel, contactUri } = this._buildTransportSocket(config, username);
+      this._log('info', `Connecting to ${connectLabel}`);
+      const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${username}@${server}`,
         password, display_name: displayName, register: true,
         register_expires: 300, user_agent: 'SIPEndpoint/1.0',
@@ -712,7 +735,9 @@ class SipManager extends EventEmitter {
             if (level === 'warn' || level === 'error') this._log(level, `[${category}] ${content}`);
           }
         }
-      });
+      };
+      if (contactUri) uaOptions.contact_uri = contactUri;
+      this.ua = new JsSIP.UA(uaOptions);
       this.ua.on('registered', () => {
         this.registered = true;
         this._log('info', `Registered as ${username}@${server}`);
@@ -730,12 +755,14 @@ class SipManager extends EventEmitter {
         reject(new Error(`Registration failed: ${cause}`));
       });
       this.ua.on('connected',    () => {
-        this._log('info', `WebSocket connected to ${wsUri}`);
-        // Hook WS message stream to capture 200 OK responses
-        // (JsSIP doesn't expose 200 OK on session events for outbound calls)
+        this._log('info', `Connected to ${connectLabel}`);
+        // Hook the transport's raw message stream to capture 100/180/200
+        // responses (JsSIP doesn't expose these on session events for
+        // outbound calls) — WS needs internal reflection, raw UDP exposes
+        // a direct callback instead. See _hookTransportCapture().
         this._hookTransportCapture();
       });
-      this.ua.on('disconnected', (e) => this._log('warn', `WebSocket disconnected: ${e?.cause || ''}`));
+      this.ua.on('disconnected', (e) => this._log('warn', `Transport disconnected: ${e?.cause || ''}`));
       this.ua.on('newRTCSession', (data) => this._handleNewSession(data.session));
 
       this.ua.start();
@@ -743,11 +770,32 @@ class SipManager extends EventEmitter {
     });
   }
 
-  // ── WS transport capture hook ─────────────────────────────────────────────
-  // Hooks the raw WebSocket message stream so 100/200 responses (which JsSIP
-  // doesn't expose on session events for outbound calls) still make it into
-  // the pcap. Shared by both the registered UA and ad-hoc unregistered UAs.
+  // ── Transport capture hook ────────────────────────────────────────────────
+  // Hooks the raw transport message stream so 100/180/200 responses (which
+  // JsSIP doesn't expose on session events for outbound calls) still make it
+  // into the pcap. Shared by both the registered UA and ad-hoc unregistered UAs.
   _hookTransportCapture() {
+    const transportSocket = this.ua?._transport?.socket;
+    if (transportSocket instanceof UdpSocketInterface) {
+      // We own the receive path directly — no WS-style reflection needed.
+      if (transportSocket._sipCaptureHooked) return;
+      transportSocket._sipCaptureHooked = true;
+      transportSocket.onRawMessage = (text, direction) => {
+        const callId = this._pendingCallId || this.activeCall?.callId;
+        if (!callId) return;
+        const localIp = getLocalIp();
+        const server  = this.config?.server || '';
+        if (direction === 'in') captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, text);
+        else                    captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, text);
+      };
+      return;
+    }
+    this._hookWsTransportCapture();
+  }
+
+  // WS-specific fallback: reflects into WebSocketInterface internals since
+  // JsSIP doesn't expose a first-class raw-message callback for that transport.
+  _hookWsTransportCapture() {
     setTimeout(() => {
       try {
         const transport = this.ua?._transport;
@@ -859,20 +907,17 @@ class SipManager extends EventEmitter {
       const domain = stripped.slice(at + 1).split(';')[0].trim();
       if (!domain) return reject(new Error('Missing SIP domain after @'));
 
-      const transport  = opts.transport === 'TLS' ? 'TLS' : 'UDP';
-      const wsProto     = transport === 'TLS' ? 'wss' : 'ws';
-      const sipProto    = transport === 'TLS' ? 'sips' : 'sip';
-      const wsPort      = opts.wsPort || (transport === 'TLS' ? 8089 : 8088);
-      const wsPath      = opts.wsPath || '/ws';
-      const wsUri       = `${wsProto}://${domain}:${wsPort}${wsPath}`;
+      const transport   = opts.transport === 'TLS' ? 'TLS' : opts.transport === 'UDP-RAW' ? 'UDP-RAW' : 'UDP';
       const displayName = (opts.displayName || '').trim() || 'anonymous';
       const localUser   = displayName.replace(/[^A-Za-z0-9._-]/g, '') || 'anonymous';
-      const targetUri    = `${sipProto}:${stripped}`;
+
+      const anonConfig = { server: domain, transport, port: opts.port, wsPort: opts.wsPort, wsPath: opts.wsPath };
+      const { socket, sipProto, connectLabel, contactUri } = this._buildTransportSocket(anonConfig, localUser);
+      const targetUri = `${sipProto}:${stripped}`;
 
       if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
-      this._log('info', `Unregistered call — connecting to ${wsUri}`);
-      const socket = new JsSIP.WebSocketInterface(wsUri);
-      this.ua = new JsSIP.UA({
+      this._log('info', `Unregistered call — connecting to ${connectLabel}`);
+      const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${localUser}@${domain}`,
         display_name: displayName, register: false, user_agent: 'SIPEndpoint/1.0',
         log: { builtinEnabled: false, level: 'warn',
@@ -880,13 +925,15 @@ class SipManager extends EventEmitter {
             if (level === 'warn' || level === 'error') this._log(level, `[${category}] ${content}`);
           }
         }
-      });
-      this.config = { server: domain, username: localUser, displayName, transport, wsPort, wsPath };
+      };
+      if (contactUri) uaOptions.contact_uri = contactUri;
+      this.ua = new JsSIP.UA(uaOptions);
+      this.config = { server: domain, username: localUser, displayName, transport, port: opts.port, wsPort: opts.wsPort, wsPath: opts.wsPath };
       this._anonymousUa = true;
 
       let settled = false;
       this.ua.on('connected', () => {
-        this._log('info', `WebSocket connected to ${wsUri}`);
+        this._log('info', `Connected to ${connectLabel}`);
         this._hookTransportCapture();
         if (settled) return;
         settled = true;
@@ -895,7 +942,7 @@ class SipManager extends EventEmitter {
           reject(err);
         });
       });
-      this.ua.on('disconnected', (e) => this._log('warn', `WebSocket disconnected: ${e?.cause || ''}`));
+      this.ua.on('disconnected', (e) => this._log('warn', `Transport disconnected: ${e?.cause || ''}`));
       this.ua.on('newRTCSession', (data) => this._handleNewSession(data.session));
 
       this.ua.start();
@@ -1001,10 +1048,11 @@ class SipManager extends EventEmitter {
         const localTag  = String(dialogId.local_tag  || '');
         const remoteTag = String(dialogId.remote_tag || '');
         const cseq      = (dialog.local_seqnum || 1);
+        const viaTransport = this.ua?._transport?.socket?.via_transport || 'WS';
         const CRLF      = '\r\n';
         const ackText   = [
           `ACK ${remoteUri} SIP/2.0`,
-          `Via: SIP/2.0/WS ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
+          `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
           `Max-Forwards: 70`,
           `From: <${localUri}>;tag=${localTag}`,
           `To: <${remoteUri}>;tag=${remoteTag}`,
@@ -1445,10 +1493,11 @@ class SipManager extends EventEmitter {
       const cseq      = (dialog.local_seqnum || dialog._local_seqnum || 1) + 1;
 
       this._log('info', `[CAP] BYE dialog: remote=${remoteUri} local=${localUri} cseq=${cseq}`);
+      const viaTransport = this.ua?._transport?.socket?.via_transport || 'WS';
       const CRLF      = '\r\n';
       const byeText   = [
         `BYE ${remoteUri} SIP/2.0`,
-        `Via: SIP/2.0/WS ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
+        `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
         `Max-Forwards: 70`,
         `From: <${localUri}>;tag=${localTag}`,
         `To: <${remoteUri}>;tag=${remoteTag}`,
@@ -1544,9 +1593,13 @@ class SipManager extends EventEmitter {
     const cseq      = (dialog.local_seqnum || 1) + 1;
     const routeSet  = (dialog.route_set || []).map(r => `Route: ${r}`).filter(Boolean);
 
+    const transport = this.ua?._transport;
+    if (!transport || !transport.socket) throw new Error('No transport');
+    const viaTransport = transport.socket.via_transport || 'WS';
+
     const msg = [
       `INVITE ${remoteUri} SIP/2.0`,
-      `Via: SIP/2.0/WS ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
+      `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
       `Max-Forwards: 70`,
       `From: <${localUri}>;tag=${localTag}`,
       `To: <${remoteUri}>;tag=${remoteTag}`,
@@ -1560,12 +1613,10 @@ class SipManager extends EventEmitter {
       sdp
     ].join('\r\n');
 
-    const transport = this.ua?._transport;
-    if (!transport) throw new Error('No transport');
-    const ws = transport._ws || transport.ws || transport._socket || transport._conn;
-    if (!ws) throw new Error('WebSocket not found');
-    if (ws.readyState !== 1) throw new Error('WebSocket not open');
-    ws.send(msg);
+    // transport.socket is always the exact object passed to `sockets:[...]`
+    // (WebSocketInterface or UdpSocketInterface) — its send() return value
+    // tells us whether the transport is actually open, for both alike.
+    if (!transport.socket.send(msg)) throw new Error('Transport not open');
     this._log('info', `Sent raw re-INVITE (hold=${hold}, cseq=${cseq})`);
   }
 

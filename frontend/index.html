@@ -229,7 +229,7 @@
       margin-bottom: 5px;
     }
 
-    input, select {
+    input:not([type="checkbox"]), select {
       width: 100%;
       background: var(--surface);
       border: 1px solid var(--border2);
@@ -248,6 +248,32 @@
       border-color: var(--blue);
       box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
     }
+
+    /* ── Toggle switch ───────────────────────────────────────────────── */
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 0;
+    }
+    .settings-row + .settings-row { border-top: 1px solid var(--border); }
+    .settings-label { font-size: 13px; color: var(--text); }
+    .settings-hint  { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+    .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex-shrink: 0; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch .slider {
+      position: absolute; inset: 0; cursor: pointer;
+      background: var(--border2); border-radius: 22px;
+      transition: background-color 0.2s;
+    }
+    .switch .slider::before {
+      content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px;
+      background: #fff; border-radius: 50%; transition: transform 0.2s; box-shadow: var(--shadow-sm);
+    }
+    .switch input:checked + .slider { background: var(--blue); }
+    .switch input:checked + .slider::before { transform: translateX(16px); }
 
     input::placeholder { color: var(--text-dim); }
 
@@ -1341,14 +1367,15 @@
           <div><label>SIP Server</label><input id="cfg-server" type="text" placeholder="pbx.local"></div>
           <div><label>Port</label><input id="cfg-port" type="number" value="5060"></div>
         </div>
-        <div class="field-group"><label>WebSocket Port</label><input id="cfg-wsport" type="number" value="8088"></div>
         <div class="field-group">
           <label>Transport</label>
-          <select id="cfg-transport">
+          <select id="cfg-transport" onchange="updateCfgTransportFields()">
             <option value="UDP">UDP (ws://)</option>
             <option value="TLS">TLS (wss://)</option>
+            <option value="UDP-RAW">UDP (raw, no WS)</option>
           </select>
         </div>
+        <div class="field-group" id="cfg-wsport-group"><label>WebSocket Port</label><input id="cfg-wsport" type="number" value="8088"></div>
         <div class="field-group"><label>Username</label><input id="cfg-user" type="text" placeholder="1001"></div>
         <div class="field-group"><label>Password</label><input id="cfg-pass" type="password" placeholder="••••••••"></div>
         <div class="field-group"><label>Display Name</label><input id="cfg-display" type="text" placeholder="Alice"></div>
@@ -1357,6 +1384,39 @@
       <div style="display:flex;gap:8px;">
         <button class="btn btn-primary btn-full" id="btn-register" onclick="doRegister()">Register</button>
         <button class="btn btn-outline" id="btn-unregister" onclick="doUnregister()" disabled>Unreg</button>
+      </div>
+
+      <div class="api-card" style="margin-top:16px;padding:4px 12px;">
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Auto-capture (pcap)</div>
+            <div class="settings-hint">Start a packet capture automatically on every call</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="setting-capture" checked onchange="updateSetting('captureEnabled', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Live transcript</div>
+            <div class="settings-hint">Transcribe speech in real time during calls</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="setting-transcript" checked onchange="updateSetting('liveTranscriptEnabled', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Auto-record</div>
+            <div class="settings-hint">Start on-demand recording automatically when a call connects</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="setting-autorecord" onchange="updateSetting('autoRecordEnabled', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
 
       <div class="api-ref collapsed" id="api-ref">
@@ -1370,6 +1430,8 @@
         <div class="api-row"><span class="api-method get">GET</span><span class="api-path">/api/status</span></div>
         <div class="api-row"><span class="api-method post">POST</span><span class="api-path">/api/register</span></div>
         <div class="api-row"><span class="api-method post">POST</span><span class="api-path">/api/unregister</span></div>
+        <div class="api-row"><span class="api-method get">GET</span><span class="api-path">/api/settings</span></div>
+        <div class="api-row"><span class="api-method post">POST</span><span class="api-path">/api/settings</span></div>
 
         <div class="api-section-label">Calls</div>
         <div class="api-row"><span class="api-method post">POST</span><span class="api-path">/api/call</span></div>
@@ -1478,13 +1540,15 @@
         <div class="unreg-advanced" id="unreg-advanced" style="display:none;">
           <div class="field-group"><input id="unreg-callerid" type="text" placeholder="Caller ID (default: anonymous)"></div>
           <div class="field-group">
-            <select id="unreg-transport">
+            <select id="unreg-transport" onchange="updateUnregTransportFields()">
               <option value="UDP">UDP (ws://)</option>
               <option value="TLS">TLS (wss://)</option>
+              <option value="UDP-RAW">UDP (raw, no WS)</option>
             </select>
           </div>
-          <div class="field-group"><input id="unreg-wsport" type="number" placeholder="WS port (8088)"></div>
-          <div class="field-group"><input id="unreg-wspath" type="text" placeholder="WS path (/ws)"></div>
+          <div class="field-group" id="unreg-port-group" style="display:none;"><input id="unreg-port" type="number" placeholder="Port (5060)"></div>
+          <div class="field-group" id="unreg-wsport-group"><input id="unreg-wsport" type="number" placeholder="WS port (8088)"></div>
+          <div class="field-group" id="unreg-wspath-group"><input id="unreg-wspath" type="text" placeholder="WS path (/ws)"></div>
         </div>
       </div>
       <div class="dtmf-grid">
@@ -1717,6 +1781,19 @@ function toggleUnregAdvanced() {
   document.getElementById('unreg-advanced-toggle').textContent = shown ? 'Advanced ▾' : 'Advanced ▴';
 }
 
+// WS-specific fields (wsPort/wsPath) are meaningless for raw UDP — hide them.
+function updateCfgTransportFields() {
+  const isRawUdp = document.getElementById('cfg-transport').value === 'UDP-RAW';
+  document.getElementById('cfg-wsport-group').style.display = isRawUdp ? 'none' : '';
+}
+
+function updateUnregTransportFields() {
+  const isRawUdp = document.getElementById('unreg-transport').value === 'UDP-RAW';
+  document.getElementById('unreg-port-group').style.display   = isRawUdp ? '' : 'none';
+  document.getElementById('unreg-wsport-group').style.display = isRawUdp ? 'none' : '';
+  document.getElementById('unreg-wspath-group').style.display = isRawUdp ? 'none' : '';
+}
+
 function onIncomingCall(data) {
   state.incomingCall = data;
   document.getElementById('incoming-from').textContent = `${data.displayName || ''}\n${data.from}`;
@@ -1831,6 +1908,7 @@ async function doCall() {
         target,
         displayName: document.getElementById('unreg-callerid').value.trim() || undefined,
         transport:   document.getElementById('unreg-transport').value,
+        port:        document.getElementById('unreg-port').value   ? parseInt(document.getElementById('unreg-port').value, 10)   : undefined,
         wsPort:      document.getElementById('unreg-wsport').value ? parseInt(document.getElementById('unreg-wsport').value, 10) : undefined,
         wsPath:      document.getElementById('unreg-wspath').value.trim() || undefined,
       });
@@ -1971,6 +2049,7 @@ function lockRegForm(config) {
         if (opt.value === config.transport) { opt.selected = true; break; }
       }
     }
+    updateCfgTransportFields();
     // Show registered identity in banner
     const txt = document.getElementById('reg-locked-text');
     if (txt) txt.textContent = `${config.username}@${config.server}`;
@@ -2980,9 +3059,25 @@ function _capStopAudio(idx) {
   }
 }
 
+// ─── Settings (auto-capture / live transcript / auto-record toggles) ───────────
+async function loadSettings() {
+  const r = await api('GET', '/api/settings');
+  if (r.error) return;
+  document.getElementById('setting-capture').checked    = r.captureEnabled;
+  document.getElementById('setting-transcript').checked = r.liveTranscriptEnabled;
+  document.getElementById('setting-autorecord').checked = r.autoRecordEnabled;
+}
+
+async function updateSetting(key, value) {
+  const r = await api('POST', '/api/settings', { [key]: value });
+  if (r.error) { addLog('error', r.error); return; }
+  addLog('info', `Setting updated: ${key}=${value}`);
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 applyTheme(localStorage.getItem('sip-theme') || 'light');
 applySidePanelsCollapsed(localStorage.getItem('sip-side-panels-hidden') === '1');
+loadSettings();
 connectWS();
 addLog('info','SIP Endpoint UI initialised');
 loadHistory();
