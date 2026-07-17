@@ -10,38 +10,38 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│              Docker / Podman Container (root, --privileged)      │
-│                                                                    │
-│  ┌───────────┐   ┌─────────────┐   ┌────────────────┐            │
-│  │  Express  │   │ SipManager  │   │ CaptureManager  │            │
-│  │  REST API │◄─►│ (JsSIP/WS,  │   │ (pure Node pcap)│            │
-│  │  :3000    │   │  RTP bridge)│   └────────┬────────┘            │
-│  └─────┬─────┘   └──────┬──────┘            │                     │
-│        │                │            ┌───────▼────────┐           │
-│        │                ├───────────►│  AudioDecoder   │           │
-│        │                │            │ G.722/PCMU/PCMA │           │
-│        │                │            │  → rx/tx WAV    │           │
-│        │                │            └─────────────────┘           │
-│        │                ├───────────►┌─────────────────┐           │
-│        │                │            │ LiveTranscriber │           │
-│        │                │            │ whisper-cli,    │           │
-│        │                │            │ windowed (6s)   │           │
-│        │                │            └─────────────────┘           │
-│        │                └───────────►┌─────────────────┐           │
-│        │                             │TranscribeManager│           │
-│        │                             │ post-call jobs  │           │
-│        │                             └─────────────────┘           │
-│  ┌─────▼──────────────────────────┐                                │
-│  │        WebSocket Server        │                                │
-│  │  /            control events   │                                │
-│  │  /audio       PCM audio relay  │                                │
-│  │  /transcript  live whisper text│                                │
-│  └────────────────┬────────────────┘                               │
-│                    │                                                │
-│  ┌─────────────────▼────────────────┐                              │
-│  │    Frontend (Single-file HTML)   │                              │
-│  │  Dark/light mode · Responsive    │                              │
-│  └───────────────────────────────────┘                             │
+│        Docker / Podman Container (root, --privileged)            │
+│                                                                  │
+│  ┌───────────┐   ┌─────────────┐   ┌───────────── ───┐           │
+│  │  Express  │   │ SipManager  │   │ CaptureManager  │           │
+│  │  REST API │◄─►│ (JsSIP/WS,  │   │ (pure Node pcap)│           │
+│  │  :3000    │   │  RTP bridge)│   └────────┬────────┘           │
+│  └─────┬─────┘   └──────┬──────┘            │                    │
+│        │                │            ┌──────▼──  ──────┐         │
+│        │                ├───────────►│  AudioDecoder   │         │
+│        │                │            │ G.722/PCMU/PCMA │         │
+│        │                │            │  → rx/tx WAV    │         │
+│        │                │            └─────────────────┘         │
+│        │                ├───────────►┌─────────────────┐         │
+│        │                │            │ LiveTranscriber │         │
+│        │                │            │ whisper-cli,    │         │
+│        │                │            │ windowed (6s)   │         │
+│        │                │            └─────────────────┘         │
+│        │                └───────────►┌─────────────────┐         │
+│        │                             │TranscribeManager│         │
+│        │                             │ post-call jobs  │         │
+│        │                             └─────────────────┘         │
+│  ┌─────▼──────────────────────────┐                              │
+│  │        WebSocket Server        │                              │
+│  │  /            control events   │                              │
+│  │  /audio       PCM audio relay  │                              │
+│  │  /transcript  live whisper text│                              │
+│  └────────────────┬───────────────┘                              │
+│                   │                                              │
+│  ┌────────────────▼────────────────┐                             │
+│  │    Frontend (Single-file HTML)  │                             │
+│  │  Dark/light mode · Responsive   │                             │
+│  └─────────────────────────────────┘                             │
 └──────────────────────────────────────────────────────────────────┘
          │ SIP over WebSocket or UDP   │ UDP RTP
          ▼                             ▼
@@ -69,11 +69,16 @@ A fully containerized SIP softphone with a web UI, complete REST API for headles
 ---
 
 ## Screenshots
-<img width="1335" height="1730" alt="Image" src="https://github.com/user-attachments/assets/9ef74ca0-d832-4d28-a445-fa0915b7ab70" /> <br>
-<img width="1335" height="1730" alt="Image" src="https://github.com/user-attachments/assets/4a0a2073-a7c7-4cee-82e4-9370324a632b" /> <br>
-<img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/11bb850e-ec9c-40f4-a68c-8452edc965ad" /> <br>
-<img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/27afe985-fa58-4e1c-8a7a-00aec9c7f165" /> <br>
-<img width="309" height="230" alt="Image" src="https://github.com/user-attachments/assets/9aff4d44-c056-4236-a9b6-8e117f2b6344" /> <br>
+<img width="1114" height="1098" alt="Image" src="https://github.com/user-attachments/assets/c3c639a6-1326-41dd-84f4-2ec1bc85b520" />
+<br><br>
+<img width="1109" height="1080" alt="Image" src="https://github.com/user-attachments/assets/97db004f-3b0c-4808-a593-de76836c994a" />
+<br><br>
+<img width="296" height="484" alt="Image" src="https://github.com/user-attachments/assets/4d3b9d91-f7eb-401f-9e02-8850cdcbc1af" />
+<br><br>
+<img width="296" height="484" alt="Image" src="https://github.com/user-attachments/assets/cf4da6b0-f25c-4565-8c66-4742857ac13a" />
+<br><br>
+<img width="288" height="602" alt="Image" src="https://github.com/user-attachments/assets/eca4dbc6-7075-4af4-9228-d8e7da3a5e82" />
+<br><br>
 
 ---
 
