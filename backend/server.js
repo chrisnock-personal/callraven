@@ -214,14 +214,14 @@ app.get('/api/transcript/status', (req, res) => res.json({
 }));
 
 app.post('/api/register', async (req, res) => {
-  const { server, port, username, password, displayName, transport, wsPort, wsPath } = req.body;
+  const { server, port, username, password, displayName, transport, wsPort, wsPath, allowSelfSigned } = req.body;
   if (!server || !username || !password)
     return res.status(400).json({ error: 'server, username, and password are required' });
   try {
     const result = await sipManager.register({
       server, username, password,
       port: port || 5060, wsPort: wsPort || 8088, wsPath: wsPath || '/ws',
-      displayName: displayName || username, transport: transport || 'UDP'
+      displayName: displayName || username, transport: transport || 'UDP', allowSelfSigned
     });
     res.json({ success: true, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -247,7 +247,7 @@ app.post('/api/call', async (req, res) => {
 });
 
 app.post('/api/call/anonymous', async (req, res) => {
-  const { target, displayName, wsPort, wsPath, transport, port } = req.body;
+  const { target, displayName, wsPort, wsPath, transport, port, allowSelfSigned } = req.body;
   if (!target) return res.status(400).json({ error: 'target is required' });
   const state = sipManager.getState();
   if (state.registered) return res.status(409).json({ error: 'Already registered — use the normal dial instead' });
@@ -255,7 +255,7 @@ app.post('/api/call/anonymous', async (req, res) => {
   try {
     const callId = uuidv4();
     if (settings.captureEnabled) captureManager.startCapture(callId);
-    const result = await sipManager.makeUnregisteredCall(target, callId, { displayName, wsPort, wsPath, transport, port });
+    const result = await sipManager.makeUnregisteredCall(target, callId, { displayName, wsPort, wsPath, transport, port, allowSelfSigned });
     res.json({ success: true, callId, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

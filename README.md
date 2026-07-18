@@ -4,7 +4,7 @@
 
 A fully containerized SIP softphone with a web UI and a complete REST API for headless operation.
 
-- SIP over WebSocket or raw UDP (no WS transport module required on the PBX; TCP not yet implemented)
+- SIP over WebSocket, raw UDP, raw TCP, or raw TLS (SIPS) — no WS transport module required on the PBX
 - Calling with or without SIP registration
 - Per-call packet capture (INVITE/100/180/200/ACK/BYE + RTP) — can be toggled off
 - Dual-channel (remote/local) call recording
@@ -66,6 +66,7 @@ A fully containerized SIP softphone with a web UI and a complete REST API for he
 | `backend/server.js` | Express HTTP/WS server, REST API endpoints, WebSocket hub (control/audio/transcript), audio + transcript fan-out |
 | `backend/sipManager.js` | JsSIP UA, call state machine, RTP bridge, raw re-INVITE hold, WAV playback, keepalive, IP-change re-registration |
 | `backend/udpSipSocket.js` | Raw UDP `Socket` implementation for JsSIP (`transport: 'UDP-RAW'`), with its own RFC 3261-style retransmission |
+| `backend/tcpSipSocket.js` | Raw TCP/TLS `Socket` implementation for JsSIP (`transport: 'TCP-RAW'`/`'TLS-RAW'`), with Content-Length-based message framing |
 | `backend/captureManager.js` | Per-call `.pcap` writer (pure Node.js, no tcpdump) |
 | `backend/audioDecoder.js` | G.722/PCMU/PCMA decoder, dual-channel (rx/tx) call WAV recorder |
 | `backend/callHistory.js` | Persistent call history (JSON + CSV export) |
@@ -185,7 +186,7 @@ POST /api/register
 }
 ```
 
-**Transport values:** `UDP` (default, SIP over plaintext WebSocket — `ws://`), `TLS` (SIP over WebSocket Secure — `wss://`), or `UDP-RAW` (raw SIP over UDP, no WebSocket — see [Raw UDP SIP Transport](#raw-udp-sip-transport) below). `wsPort`/`wsPath` apply to `UDP`/`TLS` only; `port` is the real destination UDP port for `UDP-RAW` (default `5060`).
+**Transport values:** `UDP` (default, SIP over plaintext WebSocket — `ws://`), `TLS` (SIP over WebSocket Secure — `wss://`), `UDP-RAW` (raw SIP over UDP, no WebSocket), `TCP-RAW` (raw SIP over TCP), or `TLS-RAW` (raw SIP over TLS — SIPS). See [Raw UDP SIP Transport](#raw-udp-sip-transport) and [Raw TCP/TLS SIP Transport](#raw-tcptls-sip-transport-secure-sip) below. `wsPort`/`wsPath` apply to `UDP`/`TLS` only; `port` is the real destination port for the `*-RAW` transports (default `5060`); `allowSelfSigned` applies to `TLS-RAW` only.
 
 ### Raw UDP SIP Transport
 
@@ -196,6 +197,18 @@ Implemented in `backend/udpSipSocket.js` as a custom JsSIP `Socket` — dialogs,
 `SIP_PORT` (default `5060`) sets the local UDP port this transport binds to, in addition to its existing use as the pcap BPF filter port.
 
 Unregistered calling (below) also supports `UDP-RAW` via the same `transport` field.
+
+### Raw TCP/TLS SIP Transport (Secure SIP)
+
+Select **"TCP (raw, no WS)"** or **"TLS (raw, no WS)"** as the Transport for SIP over a raw TCP stream, optionally encrypted (SIPS). Implemented in `backend/tcpSipSocket.js`, reusing the exact same JsSIP integration approach as the raw UDP transport — same reused dialogs/digest-auth/hold/transfer/conference/DTMF, no retransmission logic needed this time since TCP/TLS are reliable transports (only UDP needs that).
+
+The one thing genuinely new here: TCP/TLS are stream-based, so an incoming chunk of bytes doesn't necessarily correspond to one complete SIP message the way a UDP datagram does — a message can be split across multiple reads, or several messages can arrive in a single read. `tcpSipSocket.js` buffers incoming bytes and splits them into complete messages using each message's `Content-Length` header before handing them to JsSIP one at a time.
+
+For `TLS-RAW`, an **"Allow self-signed certificate"** toggle appears (defaults off — TLS verifies the cert normally unless enabled), since self-signed certs are extremely common on self-hosted PBXes.
+
+**Known limitation:** inbound calls depend on the PBX reusing the existing outbound connection to send the INVITE back down it (common in practice — the same assumption the WebSocket transport already relies on). This app doesn't run a listening TCP/TLS server to accept a fresh inbound connection from the PBX.
+
+Unregistered calling also supports `TCP-RAW`/`TLS-RAW` via the same `transport` field, plus `allowSelfSigned`.
 
 ### Settings
 
@@ -211,7 +224,7 @@ Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
 | `POST` | `/api/call` | `{target}` | Initiate outbound call while registered. Starts pcap capture automatically (unless disabled in Settings). |
-| `POST` | `/api/call/anonymous` | `{target, displayName?, transport?, port?, wsPort?, wsPath?}` | Place a call **without** an active registration — see Unregistered Calling below. Only usable while unregistered and idle. |
+| `POST` | `/api/call/anonymous` | `{target, displayName?, transport?, port?, wsPort?, wsPath?, allowSelfSigned?}` | Place a call **without** an active registration — see Unregistered Calling below. Only usable while unregistered and idle. |
 | `POST` | `/api/answer` | — | Answer incoming call. Starts capture automatically (unless disabled in Settings). |
 | `POST` | `/api/hangup` | — | End active call. Sends BYE or CANCEL (pre-answer). Finalises capture. |
 | `POST` | `/api/reject` | — | Reject incoming call (SIP 603 Decline) |
@@ -230,7 +243,7 @@ Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` 
 
 Places a call without ever registering, by connecting a throwaway UA directly to the target's SIP domain — there's no account, just a caller-ID string presented in the From header. Only usable while not registered and idle (returns 409 otherwise).
 
-The target **must** be in the form `<address>@<sipdomain>` (a bare extension isn't resolvable without a registered server to fall back to). In the UI, this happens automatically: typing an `@`-containing address into the dial box while unregistered calls `/api/call/anonymous` instead of `/api/call`; an **Advanced** panel exposes `displayName` (caller ID, default `anonymous`), `transport` (`UDP`/`TLS`/`UDP-RAW`), `port`, `wsPort`, and `wsPath`.
+The target **must** be in the form `<address>@<sipdomain>` (a bare extension isn't resolvable without a registered server to fall back to). In the UI, this happens automatically: typing an `@`-containing address into the dial box while unregistered calls `/api/call/anonymous` instead of `/api/call`; an **Advanced** panel exposes `displayName` (caller ID, default `anonymous`), `transport` (`UDP`/`TLS`/`UDP-RAW`/`TCP-RAW`/`TLS-RAW`), `port`, `wsPort`, `wsPath`, and (for `TLS-RAW`) `allowSelfSigned`.
 
 ```json
 POST /api/call/anonymous
@@ -500,8 +513,8 @@ The layout adapts at 1100px (right panel drops below) and 768px (single column).
 - [x] **Unregistered calling** — allow placing a call without an active SIP registration by entering `<address>@<sipdomain>` directly
 - [x] **Collapsible side panels** — toggle in the header to hide/show both the SIP Registration panel and the Captures/History/Transcript panel at once, to reclaim screen space
 - [x] **Vanilla SIP transport** — support raw SIP over UDP (not just SIP-over-WebSocket via JsSIP) to interoperate with PBXs/endpoints that don't offer a WS transport. Select "UDP (raw, no WS)" as the Transport. TCP is not implemented.
-- [ ] **Vanilla TCP SIP support** — extend the raw SIP transport (`udpSipSocket.js`) to also support TCP, alongside the existing raw UDP option
-- [ ] **Secure SIP (SIPS/TLS)** — support SIP over TLS for the raw transport (encrypted signaling to the PBX directly, distinct from the existing WSS option which is TLS at the WebSocket layer only)
+- [x] **Vanilla TCP SIP support** — raw SIP over TCP via `backend/tcpSipSocket.js`. Select "TCP (raw, no WS)" as the Transport.
+- [x] **Secure SIP (SIPS/TLS)** — raw SIP over TLS (SIPS), encrypted signaling directly to the PBX, distinct from the existing WSS option (TLS at the WebSocket layer only). Select "TLS (raw, no WS)" as the Transport; an "Allow self-signed certificate" toggle appears for self-hosted PBXes.
 - [x] **Configurable pcap capture** — toggle in the left panel (`GET`/`POST /api/settings`, `captureEnabled`) to disable automatic pcap capture on calls
 - [x] **Configurable live transcript** — toggle in the left panel (`GET`/`POST /api/settings`, `liveTranscriptEnabled`) to disable automatic live transcription on calls
 - [x] **Auto-record option** — toggle in the left panel (`autoRecordEnabled` via `/api/settings`) to automatically start on-demand recording when a call connects, instead of requiring a manual click each time

@@ -65,6 +65,7 @@ global.WebSocket = WebSocket;
 
 const JsSIP = require('jssip');
 const UdpSocketInterface = require('./udpSipSocket');
+const TcpSocketInterface = require('./tcpSipSocket');
 
 // ─── RTP port pool ───────────────────────────────────────────────────────────
 const RTP_PORT_LOW  = parseInt(process.env.RTP_PORT_LOW  || '10000');
@@ -691,12 +692,13 @@ class SipManager extends EventEmitter {
   }
 
   // ── Transport socket construction ────────────────────────────────────────
-  // Builds the JsSIP Socket for a given config — either the built-in
-  // WebSocketInterface (UDP/TLS meaning ws://\/wss://, the original transport)
-  // or our own raw-UDP UdpSocketInterface (transport: 'UDP-RAW'). JsSIP's
-  // Transport layer is transport-agnostic (see udpSipSocket.js header comment)
-  // so everything else — dialogs, digest auth, REGISTER refresh, transactions —
-  // is unaffected by which one is plugged in.
+  // Builds the JsSIP Socket for a given config — the built-in WebSocketInterface
+  // (UDP/TLS meaning ws://\/wss://, the original transport), our raw-UDP
+  // UdpSocketInterface ('UDP-RAW'), or our raw TCP/TLS TcpSocketInterface
+  // ('TCP-RAW'/'TLS-RAW'). JsSIP's Transport layer is transport-agnostic (see
+  // udpSipSocket.js/tcpSipSocket.js header comments) so everything else —
+  // dialogs, digest auth, REGISTER refresh, transactions — is unaffected by
+  // which one is plugged in.
   _buildTransportSocket(config, username) {
     if (config.transport === 'UDP-RAW') {
       const port      = config.port || 5060;
@@ -708,6 +710,20 @@ class SipManager extends EventEmitter {
       // it internally) — passing a JsSIP.URI instance directly is rejected.
       const contactUri = `sip:${username}@${getLocalIp()}:${localPort};transport=udp`;
       return { socket, sipProto: 'sip', connectLabel: `udp://${config.server}:${port}`, contactUri };
+    }
+    if (config.transport === 'TCP-RAW' || config.transport === 'TLS-RAW') {
+      const secure    = config.transport === 'TLS-RAW';
+      const port      = config.port || 5060;
+      const localPort = parseInt(process.env.SIP_PORT || '5060', 10);
+      const socket    = new TcpSocketInterface(config.server, port, {
+        secure, rejectUnauthorized: !config.allowSelfSigned, localPort
+      });
+      const scheme      = secure ? 'tls' : 'tcp';
+      const contactUri  = `sip:${username}@${getLocalIp()}:${localPort};transport=${scheme}`;
+      return {
+        socket, sipProto: secure ? 'sips' : 'sip',
+        connectLabel: `${scheme}://${config.server}:${port}`, contactUri
+      };
     }
     const wsProto  = config.transport === 'TLS' ? 'wss' : 'ws';
     const sipProto = config.transport === 'TLS' ? 'sips' : 'sip';
@@ -776,7 +792,7 @@ class SipManager extends EventEmitter {
   // into the pcap. Shared by both the registered UA and ad-hoc unregistered UAs.
   _hookTransportCapture() {
     const transportSocket = this.ua?._transport?.socket;
-    if (transportSocket instanceof UdpSocketInterface) {
+    if (transportSocket instanceof UdpSocketInterface || transportSocket instanceof TcpSocketInterface) {
       // We own the receive path directly — no WS-style reflection needed.
       if (transportSocket._sipCaptureHooked) return;
       transportSocket._sipCaptureHooked = true;
@@ -907,11 +923,17 @@ class SipManager extends EventEmitter {
       const domain = stripped.slice(at + 1).split(';')[0].trim();
       if (!domain) return reject(new Error('Missing SIP domain after @'));
 
-      const transport   = opts.transport === 'TLS' ? 'TLS' : opts.transport === 'UDP-RAW' ? 'UDP-RAW' : 'UDP';
+      const rawTransports = ['UDP-RAW', 'TCP-RAW', 'TLS-RAW'];
+      const transport   = opts.transport === 'TLS' ? 'TLS'
+                         : rawTransports.includes(opts.transport) ? opts.transport
+                         : 'UDP';
       const displayName = (opts.displayName || '').trim() || 'anonymous';
       const localUser   = displayName.replace(/[^A-Za-z0-9._-]/g, '') || 'anonymous';
 
-      const anonConfig = { server: domain, transport, port: opts.port, wsPort: opts.wsPort, wsPath: opts.wsPath };
+      const anonConfig = {
+        server: domain, transport, port: opts.port, wsPort: opts.wsPort, wsPath: opts.wsPath,
+        allowSelfSigned: opts.allowSelfSigned
+      };
       const { socket, sipProto, connectLabel, contactUri } = this._buildTransportSocket(anonConfig, localUser);
       const targetUri = `${sipProto}:${stripped}`;
 
