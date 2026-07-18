@@ -1373,9 +1373,18 @@
             <option value="UDP">UDP (ws://)</option>
             <option value="TLS">TLS (wss://)</option>
             <option value="UDP-RAW">UDP (raw, no WS)</option>
+            <option value="TCP-RAW">TCP (raw, no WS)</option>
+            <option value="TLS-RAW">TLS (raw, no WS)</option>
           </select>
         </div>
         <div class="field-group" id="cfg-wsport-group"><label>WebSocket Port</label><input id="cfg-wsport" type="number" value="8088"></div>
+        <div class="settings-row" id="cfg-selfsigned-group" style="display:none;">
+          <div class="settings-label">Allow self-signed certificate</div>
+          <label class="switch">
+            <input type="checkbox" id="cfg-selfsigned">
+            <span class="slider"></span>
+          </label>
+        </div>
         <div class="field-group"><label>Username</label><input id="cfg-user" type="text" placeholder="1001"></div>
         <div class="field-group"><label>Password</label><input id="cfg-pass" type="password" placeholder="••••••••"></div>
         <div class="field-group"><label>Display Name</label><input id="cfg-display" type="text" placeholder="Alice"></div>
@@ -1544,11 +1553,20 @@
               <option value="UDP">UDP (ws://)</option>
               <option value="TLS">TLS (wss://)</option>
               <option value="UDP-RAW">UDP (raw, no WS)</option>
+              <option value="TCP-RAW">TCP (raw, no WS)</option>
+              <option value="TLS-RAW">TLS (raw, no WS)</option>
             </select>
           </div>
           <div class="field-group" id="unreg-port-group" style="display:none;"><input id="unreg-port" type="number" placeholder="Port (5060)"></div>
           <div class="field-group" id="unreg-wsport-group"><input id="unreg-wsport" type="number" placeholder="WS port (8088)"></div>
           <div class="field-group" id="unreg-wspath-group"><input id="unreg-wspath" type="text" placeholder="WS path (/ws)"></div>
+          <div class="settings-row" id="unreg-selfsigned-group" style="display:none;">
+            <div class="settings-label">Allow self-signed cert</div>
+            <label class="switch">
+              <input type="checkbox" id="unreg-selfsigned">
+              <span class="slider"></span>
+            </label>
+          </div>
         </div>
       </div>
       <div class="dtmf-grid">
@@ -1782,16 +1800,22 @@ function toggleUnregAdvanced() {
 }
 
 // WS-specific fields (wsPort/wsPath) are meaningless for raw UDP — hide them.
+const RAW_TRANSPORTS = ['UDP-RAW', 'TCP-RAW', 'TLS-RAW'];
+
 function updateCfgTransportFields() {
-  const isRawUdp = document.getElementById('cfg-transport').value === 'UDP-RAW';
-  document.getElementById('cfg-wsport-group').style.display = isRawUdp ? 'none' : '';
+  const transport = document.getElementById('cfg-transport').value;
+  const isRaw = RAW_TRANSPORTS.includes(transport);
+  document.getElementById('cfg-wsport-group').style.display     = isRaw ? 'none' : '';
+  document.getElementById('cfg-selfsigned-group').style.display = transport === 'TLS-RAW' ? '' : 'none';
 }
 
 function updateUnregTransportFields() {
-  const isRawUdp = document.getElementById('unreg-transport').value === 'UDP-RAW';
-  document.getElementById('unreg-port-group').style.display   = isRawUdp ? '' : 'none';
-  document.getElementById('unreg-wsport-group').style.display = isRawUdp ? 'none' : '';
-  document.getElementById('unreg-wspath-group').style.display = isRawUdp ? 'none' : '';
+  const transport = document.getElementById('unreg-transport').value;
+  const isRaw = RAW_TRANSPORTS.includes(transport);
+  document.getElementById('unreg-port-group').style.display       = isRaw ? '' : 'none';
+  document.getElementById('unreg-wsport-group').style.display     = isRaw ? 'none' : '';
+  document.getElementById('unreg-wspath-group').style.display     = isRaw ? 'none' : '';
+  document.getElementById('unreg-selfsigned-group').style.display = transport === 'TLS-RAW' ? '' : 'none';
 }
 
 function onIncomingCall(data) {
@@ -1877,7 +1901,8 @@ async function doRegister() {
     username:    document.getElementById('cfg-user').value.trim(),
     password:    document.getElementById('cfg-pass').value,
     displayName: document.getElementById('cfg-display').value.trim(),
-    transport:   document.getElementById('cfg-transport').value
+    transport:   document.getElementById('cfg-transport').value,
+    allowSelfSigned: document.getElementById('cfg-selfsigned').checked
   };
   if (!cfg.server||!cfg.username||!cfg.password) { addLog('error','Server, username and password required'); return; }
   addLog('info',`Registering ${cfg.username}@${cfg.server}...`);
@@ -1911,6 +1936,7 @@ async function doCall() {
         port:        document.getElementById('unreg-port').value   ? parseInt(document.getElementById('unreg-port').value, 10)   : undefined,
         wsPort:      document.getElementById('unreg-wsport').value ? parseInt(document.getElementById('unreg-wsport').value, 10) : undefined,
         wsPath:      document.getElementById('unreg-wspath').value.trim() || undefined,
+        allowSelfSigned: document.getElementById('unreg-selfsigned').checked,
       });
   if (r.error) { addLog('error',r.error); resetCallUI(); }
 }
