@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ─── SIP Endpoint Sync & Deploy Script ───────────────────────────────────────
+# ─── CallRaven Sync & Deploy Script ──────────────────────────────────────────
 # Syncs local source changes to the remote server and optionally rebuilds.
 #
 # Usage:
@@ -16,8 +16,8 @@ set -e
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 REMOTE_HOST="${SIP_REMOTE:-}"
-REMOTE_DIR="${SIP_REMOTE_DIR:-~/Apps/container-sip-endpoint}"
-CONTAINER_NAME="sip-endpoint"
+REMOTE_DIR="${SIP_REMOTE_DIR:-~/Apps/callraven}"
+CONTAINER_NAME="callraven"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── Arg parsing ──────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ if [ -z "$REMOTE_HOST" ]; then
   exit 1
 fi
 
-echo "📡  SIP Endpoint Sync & Deploy"
+echo "📡  CallRaven Sync & Deploy"
 echo "    Local:     $LOCAL_DIR"
 echo "    Remote:    $REMOTE_HOST:$REMOTE_DIR"
 echo "    Container: $CONTAINER_NAME"
@@ -135,7 +135,7 @@ if [ "$SYNC_ONLY" = false ]; then
     podman-compose down 2>/dev/null || true
 
     echo "→ Removing old image..."
-    podman rmi localhost/container-sip-endpoint_sip-endpoint:latest 2>/dev/null || true
+    podman rmi localhost/callraven_callraven:latest 2>/dev/null || true
 
     echo "→ Pruning dangling images and build cache..."
     podman image prune -f 2>/dev/null || true

@@ -1,11 +1,11 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "SIP Endpoint API",
+    "title": "CallRaven API",
     "description": "REST API for a containerized SIP softphone endpoint. Supports SIP registration, inbound/outbound calls, hold/resume, blind and attended transfer, 3-way conference, WAV file playback into the RTP stream, per-call packet capture, call history, and system logging.\n\nAll endpoints accept and return `application/json` unless stated otherwise. Real-time events are delivered via WebSocket at `ws://<host>:<port>` — connect and receive JSON event objects as calls and registrations change state.",
     "version": "1.0.0",
     "contact": {
-      "name": "SIP Endpoint"
+      "name": "CallRaven"
     },
     "license": {
       "name": "MIT"

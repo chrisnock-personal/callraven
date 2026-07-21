@@ -1,6 +1,6 @@
 <!-- a <p align="center"><img width="252" height="275" alt="Image" src="https://github.com/user-attachments/assets/0b4a14aa-f344-41f0-b744-44516543e04b" /></p> -->
 
-# SIP Endpoint — Containerized Web Softphone
+# CallRaven — Containerized Web Softphone
 
 A fully containerized SIP softphone with a web UI and a complete REST API for headless operation.
 
@@ -98,7 +98,7 @@ A fully containerized SIP softphone with a web UI and a complete REST API for he
 
 ```bash
 git clone <repo>
-cd sip-endpoint
+cd callraven
 podman-compose up -d --build
 ```
 
@@ -107,14 +107,14 @@ Open **http://localhost:3000**
 ### Manual Docker run
 
 ```bash
-docker build -t sip-endpoint .
+docker build -t callraven .
 docker run -d \
-  --name sip-endpoint \
+  --name callraven \
   --network host \
   --privileged \
   -v sip-captures:/captures \
   -v sip-wavfiles:/wavfiles \
-  sip-endpoint
+  callraven
 ```
 
 ### docker-compose.yml
@@ -122,9 +122,9 @@ docker run -d \
 ```yaml
 version: "3.9"
 services:
-  sip-endpoint:
+  callraven:
     build: .
-    container_name: sip-endpoint
+    container_name: callraven
     network_mode: host
     user: root
     privileged: true

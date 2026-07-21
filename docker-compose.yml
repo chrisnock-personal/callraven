@@ -1,9 +1,9 @@
 version: "3.9"
 
 services:
-  sip-endpoint:
+  callraven:
     build: .
-    container_name: sip-endpoint
+    container_name: callraven
     network_mode: host
     user: root
     privileged: true
