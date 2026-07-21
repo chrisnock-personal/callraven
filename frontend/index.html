@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CallRaven</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,300&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -31,6 +32,8 @@
       --text:        #111827;
       --text-mid:    #6b7280;
       --text-dim:    #9ca3af;
+      --raven-body:  #262B36;
+      --raven-ink:   #14161C;
       --sans:        'DM Sans', sans-serif;
       --mono:        'DM Mono', monospace;
       --shadow-sm:   0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
@@ -63,6 +66,8 @@
       --text:        #f1f5f9;
       --text-mid:    #94a3b8;
       --text-dim:    #475569;
+      --raven-body:  #3A4152;
+      --raven-ink:   #0A0B10;
       --shadow-sm:   0 1px 3px rgba(0,0,0,0.4);
       --shadow:      0 4px 12px rgba(0,0,0,0.35);
       --shadow-lg:   0 12px 32px rgba(0,0,0,0.5);
@@ -96,19 +101,20 @@
       z-index: 100;
     }
 
-    .logo { display: flex; align-items: center; gap: 10px; }
+    .logo { display: flex; align-items: center; gap: 12px; }
 
     .logo-mark {
-      width: 32px; height: 32px;
-      background: var(--blue);
-      border-radius: 8px;
+      width: 50px; height: 50px;
       display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 2px 8px rgba(37,99,235,0.35);
-      color: white;
-      font-size: 14px;
-      font-weight: 700;
-      letter-spacing: -0.02em;
+      flex-shrink: 0;
     }
+    .logo-mark svg { width: 100%; height: 100%; display: block; }
+    .logo-mark .rv-body  { fill: var(--raven-body); }
+    .logo-mark .rv-ink   { fill: var(--raven-ink); }
+    .logo-mark .rv-eye   { fill: var(--amber); }
+    .logo-mark .rv-pupil { fill: var(--text); }
+
+    .logo-text { display: flex; flex-direction: column; gap: 1px; }
 
     .logo-name {
       font-size: 16px;
@@ -116,18 +122,11 @@
       color: var(--text);
       letter-spacing: -0.02em;
     }
-    .logo-name span { color: var(--blue); }
 
-    .logo-version {
-      font-size: 11px;
-      color: var(--text-dim);
-      background: var(--bg2);
-      border: 1px solid var(--border);
-      padding: 2px 8px;
-      border-radius: 20px;
+    .logo-tagline {
+      font-size: 12px;
+      color: var(--text-mid);
     }
-
-    .header-sep { width: 1px; height: 24px; background: var(--border); }
 
     .status-group { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
@@ -1294,7 +1293,7 @@
     @media (max-width: 768px) {
       main { grid-template-columns: 1fr; height: auto; overflow-y: auto; }
       header { padding: 0 12px; gap: 8px; }
-      .logo-version { display: none; }
+      .logo-tagline { display: none; }
       .status-badge { padding: 4px 8px; font-size: 11px; }
       .panel { border-right: none; border-bottom: 1px solid var(--border); }
       .dtmf-key { height: 40px; font-size: 15px; }
@@ -1313,12 +1312,24 @@
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header>
   <div class="logo">
-    <div class="logo-mark">CR</div>
-    <div class="logo-name">Call<span>Raven</span></div>
-    <div class="logo-version">v1.0</div>
+    <div class="logo-mark">
+      <svg viewBox="0 0 220 200" aria-hidden="true">
+        <path class="rv-body" d="M110,64 C146,64 164,96 162,134 C160,172 138,192 110,192 C82,192 60,172 58,134 C56,96 74,64 110,64 Z"/>
+        <path class="rv-ink" d="M64,108 C48,124 46,160 64,178 C76,160 74,128 76,110 C72,107 68,106 64,108 Z"/>
+        <path class="rv-ink" d="M156,108 C172,124 174,160 156,178 C144,160 146,128 144,110 C148,107 152,106 156,108 Z"/>
+        <circle class="rv-body" cx="110" cy="98" r="44"/>
+        <path class="rv-ink" d="M90,112 C98,130 104,148 110,158 C116,148 122,130 130,112 C122,120 98,120 90,112 Z"/>
+        <circle class="rv-eye" cx="90" cy="98" r="14"/>
+        <circle class="rv-eye" cx="130" cy="98" r="14"/>
+        <circle class="rv-pupil" cx="90" cy="98" r="7"/>
+        <circle class="rv-pupil" cx="130" cy="98" r="7"/>
+      </svg>
+    </div>
+    <div class="logo-text">
+      <div class="logo-name">CallRaven</div>
+      <div class="logo-tagline">FOSS Containerised SoftPhone</div>
+    </div>
   </div>
-  <div class="header-sep"></div>
-  <div style="font-size:12px;color:var(--text-mid);">Containerized Softphone</div>
 
   <button id="side-panels-toggle" onclick="toggleSidePanels()"
     style="background:none;border:1px solid var(--border2);color:var(--text-mid);
