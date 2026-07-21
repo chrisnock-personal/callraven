@@ -104,8 +104,8 @@ function buildSdp(localIp, rtpPort) {
   const id = Date.now();
   return [
     'v=0',
-    `o=SIPEndpoint ${id} ${id} IN IP4 ${localIp}`,
-    's=SIPEndpoint Call',
+    `o=CallRaven ${id} ${id} IN IP4 ${localIp}`,
+    's=CallRaven Call',
     `c=IN IP4 ${localIp}`,
     't=0 0',
     `m=audio ${rtpPort} RTP/AVP 9 0 8 101`,
@@ -124,8 +124,8 @@ function buildSdpHold(localIp, rtpPort) {
   const id = Date.now();
   return [
     'v=0',
-    `o=SIPEndpoint ${id} ${id} IN IP4 ${localIp}`,
-    's=SIPEndpoint Call',
+    `o=CallRaven ${id} ${id} IN IP4 ${localIp}`,
+    's=CallRaven Call',
     `c=IN IP4 ${localIp}`,
     't=0 0',
     `m=audio ${rtpPort} RTP/AVP 9 0 8 101`,
@@ -744,7 +744,7 @@ class SipManager extends EventEmitter {
       const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${username}@${server}`,
         password, display_name: displayName, register: true,
-        register_expires: 300, user_agent: 'SIPEndpoint/1.0',
+        register_expires: 300, user_agent: 'CallRaven/1.0',
         connection_recovery_min_interval: 2, connection_recovery_max_interval: 30,
         log: { builtinEnabled: false, level: 'warn',
           connector: (level, category, label, content) => {
@@ -941,7 +941,7 @@ class SipManager extends EventEmitter {
       this._log('info', `Unregistered call — connecting to ${connectLabel}`);
       const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${localUser}@${domain}`,
-        display_name: displayName, register: false, user_agent: 'SIPEndpoint/1.0',
+        display_name: displayName, register: false, user_agent: 'CallRaven/1.0',
         log: { builtinEnabled: false, level: 'warn',
           connector: (level, category, label, content) => {
             if (level === 'warn' || level === 'error') this._log(level, `[${category}] ${content}`);

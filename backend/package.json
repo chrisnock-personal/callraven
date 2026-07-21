@@ -1,5 +1,5 @@
 {
-  "name": "sip-endpoint-backend",
+  "name": "callraven-backend",
   "version": "1.0.0",
   "description": "Containerized SIP softphone endpoint with REST API and packet capture",
   "main": "server.js",
