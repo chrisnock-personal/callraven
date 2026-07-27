@@ -1518,7 +1518,11 @@
           <span></span><span></span><span></span><span></span><span></span>
         </div>
         Live Audio
-        <span style="margin-left:auto;font-size:11px;font-weight:400;" id="audio-sr"></span>
+        <label style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:11px;font-weight:400;cursor:pointer;" title="Adds a small buffer to smooth minor network timing jitter during live playback">
+          <input type="checkbox" id="jitter-buffer-toggle" checked onchange="setJitterBufferEnabled(this.checked)">
+          Jitter buffer
+        </label>
+        <span style="font-size:11px;font-weight:400;" id="audio-sr"></span>
       </div>
 
       <div class="call-display-card">
@@ -2374,6 +2378,18 @@ let audioQueue      = [];
 let audioSampleRate = 16000;
 let statsInterval   = null;
 
+// Jitter buffer: delays the start of playback by JITTER_BUFFER_MS so minor
+// variance in packet arrival timing gets absorbed by the cushion instead of
+// causing the nextAudioTime cursor to fall behind and force a hard catch-up.
+// Only smooths small jitter — a real multi-hundred-ms+ gap in the source
+// (e.g. the far end genuinely not sending audio) still plays as a pause,
+// since there's nothing to fill it with.
+let jitterBufferEnabled = true;
+let jitterBufferPrimed  = false;
+const JITTER_BUFFER_MS  = 250;
+
+function setJitterBufferEnabled(v) { jitterBufferEnabled = v; }
+
 function toggleAudio() {
   if (audioListening) {
     stopAudio();
@@ -2387,6 +2403,7 @@ function toggleAudio() {
 function startAudio() {
   if (audioListening) return;
   audioListening = true;
+  jitterBufferPrimed = false;
 
   // Request permission if needed
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -2427,41 +2444,70 @@ function startAudio() {
     }
 
     audioQueue.push({ float32, sampleRate });
-    drainAudio();
+    if (!audioBatchTimer) audioBatchTimer = setTimeout(flushAudioBatch, AUDIO_BATCH_MS);
   };
 }
 
-let nextAudioTime = 0;
+let nextAudioTime    = 0;
+let audioBatchTimer  = null;
+const AUDIO_BATCH_MS = 100;
 
-// Schedules every queued buffer immediately against the running nextAudioTime
-// cursor, back-to-back, instead of waiting for the previous buffer's 'onended'
-// to fire before scheduling the next one. Chaining via onended left a gap
-// exposed to main-thread jank (GC, layout, etc.) between callback and
-// scheduling — at ~20ms/chunk that read as constant crackling/distortion.
-// Scheduling ahead of time hands all timing to the audio thread, which isn't
-// affected by main-thread delays.
-function drainAudio() {
-  if (!audioCtx) return;
-  while (audioQueue.length > 0) {
-    const { float32, sampleRate } = audioQueue.shift();
-    const buf    = audioCtx.createBuffer(1, float32.length, sampleRate);
-    buf.copyToChannel(float32, 0);
+// Every incoming chunk is only ~20ms of audio (one RTP packet). Scheduling a
+// separate AudioBufferSourceNode per chunk — even scheduled back-to-back with
+// no gap — still splices in a new node at every boundary, and Web Audio's
+// block-based rendering plus float rounding in the running time cursor means
+// those splices aren't always sample-exact; at ~50 boundaries/sec that reads
+// as constant crackling. Batching several chunks into one merged buffer before
+// scheduling cuts the number of splices ~5x for ~100ms of added latency, which
+// is unnoticeable for a monitoring "Listen" feature.
+function flushAudioBatch() {
+  audioBatchTimer = null;
+  if (!audioCtx || audioQueue.length === 0) return;
 
-    const src = audioCtx.createBufferSource();
-    src.buffer = buf;
-    src.connect(audioCtx.destination);
-
-    const now  = audioCtx.currentTime;
-    const when = Math.max(now, nextAudioTime);
-    src.start(when);
-    nextAudioTime = when + buf.duration;
+  let i = 0;
+  while (i < audioQueue.length) {
+    const sampleRate = audioQueue[i].sampleRate;
+    let j = i, totalLen = 0;
+    while (j < audioQueue.length && audioQueue[j].sampleRate === sampleRate) {
+      totalLen += audioQueue[j].float32.length;
+      j++;
+    }
+    const merged = new Float32Array(totalLen);
+    let offset = 0;
+    for (let k = i; k < j; k++) {
+      merged.set(audioQueue[k].float32, offset);
+      offset += audioQueue[k].float32.length;
+    }
+    scheduleBuffer(merged, sampleRate);
+    i = j;
   }
+  audioQueue.length = 0;
+}
+
+function scheduleBuffer(float32, sampleRate) {
+  const buf = audioCtx.createBuffer(1, float32.length, sampleRate);
+  buf.copyToChannel(float32, 0);
+
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+  if (!jitterBufferPrimed) {
+    jitterBufferPrimed = true;
+    nextAudioTime = now + (jitterBufferEnabled ? JITTER_BUFFER_MS / 1000 : 0);
+  }
+  const when = Math.max(now, nextAudioTime);
+  src.start(when);
+  nextAudioTime = when + buf.duration;
 }
 
 function stopAudio() {
   audioListening = false;
   audioQueue = [];
+  if (audioBatchTimer) { clearTimeout(audioBatchTimer); audioBatchTimer = null; }
   nextAudioTime = 0;
+  jitterBufferPrimed = false;
   if (audioWs) { try { audioWs.close(); } catch(e){} audioWs = null; }
   document.getElementById('audio-bar').classList.remove('active');
 }
