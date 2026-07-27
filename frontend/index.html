@@ -99,6 +99,9 @@
       position: sticky;
       top: 0;
       z-index: 100;
+      max-width: 1068px;
+      width: 100%;
+      margin: 0 auto;
     }
 
     .logo { display: flex; align-items: center; gap: 12px; }
@@ -181,6 +184,7 @@
       flex-direction: column;
       overflow: hidden;
       background: var(--surface);
+      min-height: 0;
     }
 
     /* Cap the dialer panel's width so it doesn't stretch edge-to-edge on wide
@@ -1016,7 +1020,8 @@
 
     /* ── Inline log (centre column, below WAV) ───────────────────────── */
     .log-inline {
-      flex: 0 0 160px;
+      flex: 0 1 260px;
+      min-height: 37px;
       overflow: hidden;
       border-top: 2px solid var(--blue-mid);
       background: var(--surface);
@@ -1049,7 +1054,8 @@
     .log-inline.collapsed .log-toggle-arrow { transform: rotate(-90deg); }
 
     .log-entries-wrap {
-      height: 123px;   /* 160px log - 37px header */
+      flex: 1 1 auto;
+      min-height: 0;
       overflow: hidden;
     }
     .log-inline.collapsed .log-entries-wrap {
@@ -1070,10 +1076,9 @@
       padding: 0 5px;
       transition: opacity 0.15s;
     }
-    .log-inline:not(.collapsed) .log-count { opacity: 0; }
 
     .log-entries {
-      height: 123px;
+      height: 100%;
       overflow-y: auto;
       padding: 6px 20px;
       font-family: var(--mono);
@@ -1081,7 +1086,7 @@
       font-weight: 300;
       line-height: 1.7;
       display: flex;
-      flex-direction: column-reverse;
+      flex-direction: column;
       background: var(--surface2);
     }
 
@@ -1327,7 +1332,7 @@
     </div>
     <div class="logo-text">
       <div class="logo-name">CallRaven</div>
-      <div class="logo-tagline">FOSS Containerised SoftPhone</div>
+      <div class="logo-tagline">Containerised SoftPhone</div>
     </div>
   </div>
 
@@ -1493,7 +1498,7 @@
 
   <!-- CENTER: Dialpad + Controls + Inline Log -->
   <div class="panel panel-center" style="display:flex;flex-direction:column;overflow:hidden;">
-    <div id="centre-scroll" style="overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;">
+    <div id="centre-scroll" style="overflow-y:auto;overflow-x:hidden;flex:0 1 auto;min-height:0;">
 
     <!-- Call display -->
     <div class="call-display">
@@ -2162,15 +2167,11 @@ function addLog(level, message, ts) {
   div.innerHTML = `<span class="log-time">${time}</span><span class="log-level ${level}">${level.toUpperCase()}</span><span class="log-msg">${message}</span>`;
   el.insertBefore(div, el.firstChild);
   while (el.children.length > 200) el.removeChild(el.lastChild);
-  // Increment count badge when panel is collapsed
-  const panel = document.getElementById('log-panel');
-  if (panel && panel.classList.contains('collapsed')) {
-    logCount++;
-    document.getElementById('log-count').textContent = logCount > 99 ? '99+' : logCount;
-  }
+  const count = el.children.length;
+  document.getElementById('log-count').textContent = count > 99 ? '99+' : count;
 }
 
-function clearLog() { document.getElementById('log-entries').innerHTML = ''; logCount = 0; document.getElementById('log-count').textContent = '0'; }
+function clearLog() { document.getElementById('log-entries').innerHTML = ''; document.getElementById('log-count').textContent = '0'; }
 
 function fmtSize(b) {
   if (!b) return '0 B';
@@ -2357,20 +2358,12 @@ async function clearHistory() {
 }
 
 // ─── Log toggle ───────────────────────────────────────────────────────────────
-let logCount = 0;
-
 function toggleApiRef() {
   document.getElementById('api-ref').classList.toggle('collapsed');
 }
 
 function toggleLog() {
-  const panel = document.getElementById('log-panel');
-  panel.classList.toggle('collapsed');
-  if (!panel.classList.contains('collapsed')) {
-    logCount = 0;
-    document.getElementById('log-count').textContent = '0';
-  }
-  setTimeout(sizeCentreScroll, 50);
+  document.getElementById('log-panel').classList.toggle('collapsed');
 }
 
 // ─── Web Audio — inbound call playback ────────────────────────────────────────
@@ -2378,7 +2371,6 @@ let audioWs         = null;
 let audioCtx        = null;
 let audioListening  = false;
 let audioQueue      = [];
-let audioPlaying    = false;
 let audioSampleRate = 16000;
 let statsInterval   = null;
 
@@ -2435,36 +2427,40 @@ function startAudio() {
     }
 
     audioQueue.push({ float32, sampleRate });
-    if (!audioPlaying) drainAudio();
+    drainAudio();
   };
 }
 
 let nextAudioTime = 0;
 
+// Schedules every queued buffer immediately against the running nextAudioTime
+// cursor, back-to-back, instead of waiting for the previous buffer's 'onended'
+// to fire before scheduling the next one. Chaining via onended left a gap
+// exposed to main-thread jank (GC, layout, etc.) between callback and
+// scheduling — at ~20ms/chunk that read as constant crackling/distortion.
+// Scheduling ahead of time hands all timing to the audio thread, which isn't
+// affected by main-thread delays.
 function drainAudio() {
-  if (!audioCtx || audioQueue.length === 0) { audioPlaying = false; return; }
-  audioPlaying = true;
+  if (!audioCtx) return;
+  while (audioQueue.length > 0) {
+    const { float32, sampleRate } = audioQueue.shift();
+    const buf    = audioCtx.createBuffer(1, float32.length, sampleRate);
+    buf.copyToChannel(float32, 0);
 
-  const { float32, sampleRate } = audioQueue.shift();
-  const buf    = audioCtx.createBuffer(1, float32.length, sampleRate);
-  buf.copyToChannel(float32, 0);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
 
-  const src = audioCtx.createBufferSource();
-  src.buffer = buf;
-  src.connect(audioCtx.destination);
-
-  const now  = audioCtx.currentTime;
-  const when = Math.max(now, nextAudioTime);
-  src.start(when);
-  nextAudioTime = when + buf.duration;
-
-  src.onended = () => drainAudio();
+    const now  = audioCtx.currentTime;
+    const when = Math.max(now, nextAudioTime);
+    src.start(when);
+    nextAudioTime = when + buf.duration;
+  }
 }
 
 function stopAudio() {
   audioListening = false;
   audioQueue = [];
-  audioPlaying = false;
   nextAudioTime = 0;
   if (audioWs) { try { audioWs.close(); } catch(e){} audioWs = null; }
   document.getElementById('audio-bar').classList.remove('active');
@@ -3140,18 +3136,6 @@ addLog('info','CallRaven UI initialised');
 loadHistory();
 loadTranscriptsCount();
 
-// Size the centre scroll wrapper to fill space above the inline log
-function sizeCentreScroll() {
-  const panel  = document.getElementById('centre-scroll').parentElement;
-  const scroll = document.getElementById('centre-scroll');
-  const log    = document.getElementById('log-panel');
-  const logH   = log.offsetHeight;
-  const panelH = panel.clientHeight;
-  scroll.style.height = Math.max(0, panelH - logH) + 'px';
-  scroll.style.overflow = 'hidden auto';
-}
-sizeCentreScroll();
-window.addEventListener('resize', sizeCentreScroll);
 requestNotifPermission();
 document.getElementById('dial-target').addEventListener('keydown', e => { if(e.key==='Enter') doCall(); });
 </script>

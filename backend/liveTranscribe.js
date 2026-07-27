@@ -5,7 +5,7 @@
  * Buffers raw RTP payloads and transcribes each window with whisper-cli.
  *
  * G.722 payloads are collected as raw bytes and decoded with ffmpeg at flush
- * time (the same approach AudioWriter uses), avoiding the stub G722Decoder.
+ * time (the same batch approach AudioWriter uses in audioDecoder.js).
  * PCMU/PCMA payloads are decoded inline to PCM16 and resampled to 16kHz.
  *
  * Emits 'text' events with each recognised phrase.
