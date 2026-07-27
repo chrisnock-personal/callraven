@@ -563,10 +563,19 @@ class RtpBridge {
     try {
       let pcm16;
       if (pt === 9) {
-        // G.722 → 16kHz 16-bit PCM
+        // G.722 → 16kHz 16-bit PCM, decoded asynchronously by a persistent
+        // ffmpeg subprocess (see audioDecoder.js) — PCM arrives via the 'pcm'
+        // event rather than as a return value, so relay it from there instead
+        // of falling through to the synchronous onAudio call below.
         const { G722Decoder } = require('./audioDecoder');
-        if (!this._g722dec) this._g722dec = new G722Decoder();
-        pcm16 = this._g722dec.decode(payload);
+        if (!this._g722dec) {
+          this._g722dec = new G722Decoder();
+          this._g722dec.on('pcm', (pcm) => {
+            if (this.onAudio && !this.held) this.onAudio(9, pcm);
+          });
+        }
+        this._g722dec.write(payload);
+        return;
       } else if (pt === 0) {
         // PCMU (μ-law) → 8kHz 16-bit PCM
         pcm16 = Buffer.alloc(payload.length * 2);
@@ -625,6 +634,10 @@ class RtpBridge {
     if (this.socket) {
       try { this.socket.close(); } catch (e) {}
       this.socket = null;
+    }
+    if (this._g722dec) {
+      this._g722dec.close();
+      this._g722dec = null;
     }
   }
 }
