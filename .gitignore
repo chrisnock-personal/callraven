@@ -1,6 +1,9 @@
 # Ignore sample scripts
 sip_call_*.py
 
+# Node dependencies
+node_modules/
+
 # Optional: ignore local outputs
 output/
 
