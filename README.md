@@ -1,6 +1,8 @@
 <!-- a <p align="center"><img width="252" height="275" alt="Image" src="https://github.com/user-attachments/assets/0b4a14aa-f344-41f0-b744-44516543e04b" /></p> -->
 
-# CallRaven — FOSS Containerized SoftPhone
+# CallRaven — Containerized SoftPhone
+
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
 
 A fully containerized SIP softphone with a web UI and a complete REST API for headless operation.
 
