@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  docker-build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test dependencies
+        run: pip install -r ci/requirements.txt
+
+      - name: Build callraven image
+        run: docker build -t callraven:ci .
+
+      - name: Boot smoke test — GET /api/status
+        run: |
+          docker run -d --name callraven-smoke --network host --privileged \
+            -e PORT=3000 -e SIP_PORT=5060 callraven:ci
+          echo "Waiting for /api/status..."
+          ok=false
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/api/status > /dev/null; then
+              echo "Backend /api/status is up."
+              ok=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" != "true" ]; then
+            echo "Container did not become healthy in time — dumping logs:"
+            docker logs callraven-smoke
+            exit 1
+          fi
+          docker rm -f callraven-smoke
+
+      - name: Build throwaway Asterisk image
+        run: docker build -t asterisk-ci ci/asterisk
+
+      - name: Start Asterisk
+        run: |
+          docker run -d --name asterisk-ci --network host asterisk-ci
+          echo "Waiting for Asterisk to accept CLI connections..."
+          ok=false
+          for i in $(seq 1 30); do
+            if docker exec asterisk-ci asterisk -rx "core show version" > /dev/null 2>&1; then
+              echo "Asterisk is up."
+              ok=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ok" != "true" ]; then
+            echo "Asterisk did not start in time — dumping logs:"
+            docker logs asterisk-ci
+            exit 1
+          fi
+
+      - name: Start EP1 and EP2
+        run: |
+          docker run -d --name callraven-ep1 --network host --privileged \
+            -e PORT=3000 -e SIP_PORT=5061 -e RTP_PORT_LOW=20000 -e RTP_PORT_HIGH=24999 \
+            callraven:ci
+          docker run -d --name callraven-ep2 --network host --privileged \
+            -e PORT=3001 -e SIP_PORT=5062 -e RTP_PORT_LOW=25000 -e RTP_PORT_HIGH=29999 \
+            callraven:ci
+
+          for url in http://localhost:3000/api/status http://localhost:3001/api/status; do
+            echo "Waiting for $url..."
+            ok=false
+            for i in $(seq 1 30); do
+              if curl -sf "$url" > /dev/null; then
+                ok=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ok" != "true" ]; then
+              echo "$url did not become healthy in time — dumping logs:"
+              docker logs callraven-ep1
+              docker logs callraven-ep2
+              exit 1
+            fi
+          done
+
+      - name: Run P2P call test
+        run: |
+          python3 ci/p2p_call_test.py \
+            --ep1-url http://localhost:3000 \
+            --ep2-url http://localhost:3001 \
+            --sip-server 127.0.0.1 \
+            --sip-port 5060
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "── Asterisk ──"
+          docker logs asterisk-ci || true
+          docker exec asterisk-ci asterisk -rx "pjsip show contacts" || true
+          docker exec asterisk-ci asterisk -rx "core show channels" || true
+          echo "── EP1 (callraven-ep1) ──"
+          docker logs callraven-ep1 || true
+          echo "── EP2 (callraven-ep2) ──"
+          docker logs callraven-ep2 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f callraven-smoke callraven-ep1 callraven-ep2 asterisk-ci 2>/dev/null || true
