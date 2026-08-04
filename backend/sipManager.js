@@ -204,6 +204,7 @@ function pcmToUlaw(sample) {
   if (sample > MAX) sample = MAX;
   sample += BIAS;
   let exp = 7;
+  // eslint-disable-next-line no-empty -- counting loop, work is in the header
   for (let m = 0x4000; (sample & m) === 0 && exp > 0; exp--, m >>= 1) {}
   return ~(sign | (exp << 4) | ((sample >> (exp + 3)) & 0x0f)) & 0xff;
 }
