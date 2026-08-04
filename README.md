@@ -617,3 +617,9 @@ SDP advertises G.722 as the preferred codec. If the PBX does not support G.722, 
 - **Live audio relay** — inbound RTP is decoded and streamed to the browser via a dedicated WebSocket endpoint for real-time listening
 - **Transcription** — on-device Whisper.cpp (statically compiled, no external API calls); live transcription during calls plus on-demand post-call transcription with speaker diarization
 - **Direct media aware** — the RTP bridge tracks the actual source of inbound packets, so Asterisk `direct_media` re-routing and re-INVITEs are handled correctly
+
+---
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE) — free for noncommercial use. Commercial use requires a separate license from the copyright holder.
