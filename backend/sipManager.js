@@ -694,6 +694,7 @@ class SipManager extends EventEmitter {
     this.activeCall   = null;
     this.config       = null;
     this.rtpBridge    = null;
+    this._transportSocket = null;  // raw UDP-RAW/TCP-RAW socket backing the current UA, if any
     // Conference: second leg
     this.confSession      = null;
     this.confBridge       = null;
@@ -758,6 +759,21 @@ class SipManager extends EventEmitter {
   // udpSipSocket.js/tcpSipSocket.js header comments) so everything else —
   // dialogs, digest auth, REGISTER refresh, transactions — is unaffected by
   // which one is plugged in.
+  // Force-release the OS port held by the transport socket built for the
+  // previous UA, if any. JsSIP's own ua.stop() only calls disconnect() on
+  // that socket once its graceful un-REGISTER exchange finishes — which can
+  // take well over a second — leaving the port bound and unavailable to the
+  // replacement socket we're about to bind for the new UA. Only UdpSocketInterface
+  // needs this (it's the only transport that waits on a slow async close);
+  // TcpSocketInterface.disconnect() already closes synchronously, and
+  // JsSIP.WebSocketInterface doesn't bind a local port at all.
+  _releasePreviousTransport() {
+    if (this._transportSocket && typeof this._transportSocket.releasePort === 'function') {
+      try { this._transportSocket.releasePort(); } catch (e) { /* best-effort */ }
+    }
+    this._transportSocket = null;
+  }
+
   _buildTransportSocket(config, username) {
     if (config.transport === 'UDP-RAW') {
       const port      = config.port || 5060;
@@ -796,9 +812,11 @@ class SipManager extends EventEmitter {
   register(config) {
     return new Promise((resolve, reject) => {
       if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
+      this._releasePreviousTransport();
       this.config = config;
       const { server, username, password, displayName } = config;
       const { socket, sipProto, connectLabel, contactUri } = this._buildTransportSocket(config, username);
+      this._transportSocket = socket;
       this._log('info', `Connecting to ${connectLabel}`);
       const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${username}@${server}`,
@@ -997,6 +1015,8 @@ class SipManager extends EventEmitter {
       const targetUri = `${sipProto}:${stripped}`;
 
       if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
+      this._releasePreviousTransport();
+      this._transportSocket = socket;
       this._log('info', `Unregistered call — connecting to ${connectLabel}`);
       const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${localUser}@${domain}`,

@@ -17,6 +17,16 @@ const T1 = 500;
 const T2 = 4000;
 const MAX_ELAPSED = 32000;
 
+// A re-register (stop() immediately followed by start() on a fresh UA/socket
+// instance, e.g. on OPTIONS-keepalive failure or an IP change) tears down
+// the old dgram socket and binds a new one to the same SIP_PORT right away.
+// dgram's close() releases the OS port asynchronously, so the rebind can
+// lose that race and fail with EADDRINUSE even though nothing else is
+// actually holding the port. Retry briefly rather than surfacing a
+// permanent connect failure for what's normally a sub-millisecond gap.
+const BIND_RETRY_ATTEMPTS  = 10;
+const BIND_RETRY_DELAY_MS  = 100;
+
 function parseTopViaBranch(text) {
   const m = text.match(/^Via:\s*([^\r\n]+)/mi);
   if (!m) return null;
@@ -67,6 +77,8 @@ class UdpSocketInterface {
     this._sip_uri       = `sip:${remoteHost}:${remotePort};transport=udp`;
     this._socket         = null;
     this._pending         = new Map();
+    this._bindRetryTimer = null;
+    this._closed          = false;
 
     // Assigned by JsSIP's Transport.js before calling connect()
     this.onconnect    = null;
@@ -85,30 +97,75 @@ class UdpSocketInterface {
 
   connect() {
     if (this._socket) return;
-    this._socket = dgram.createSocket('udp4');
-    this._socket.on('message', (msg, rinfo) => {
+    this._bindSocket(0);
+  }
+
+  _bindSocket(attempt) {
+    const socket = dgram.createSocket('udp4');
+    socket.on('message', (msg, rinfo) => {
       const text = msg.toString('utf8');
       this._cancelMatching(text);
       if (this.onRawMessage) this.onRawMessage(text, 'in');
       if (this.ondata) this.ondata(text);
     });
-    this._socket.on('error', (err) => {
+
+    const onBindError = (err) => {
+      try { socket.close(); } catch (e) {}
+      if (this._closed) return;
+      if (err.code === 'EADDRINUSE' && attempt < BIND_RETRY_ATTEMPTS) {
+        this._bindRetryTimer = setTimeout(() => {
+          this._bindRetryTimer = null;
+          this._bindSocket(attempt + 1);
+        }, BIND_RETRY_DELAY_MS);
+        return;
+      }
       console.error(`[SIP/UDP] socket error: ${err.message}`);
-    });
-    this._socket.bind(this._localPort, '0.0.0.0', () => {
+    };
+    socket.once('error', onBindError);
+
+    socket.bind(this._localPort, '0.0.0.0', () => {
+      socket.removeListener('error', onBindError);
+      if (this._closed) { try { socket.close(); } catch (e) {} return; }
+      socket.on('error', (err) => {
+        console.error(`[SIP/UDP] socket error: ${err.message}`);
+      });
+      this._socket = socket;
       console.log(`[SIP/UDP] bound 0.0.0.0:${this._localPort} -> ${this._remoteHost}:${this._remotePort}`);
       if (this.onconnect) this.onconnect();
     });
   }
 
-  disconnect() {
+  // Stops retransmits/retry timers and releases the OS port. Shared by
+  // disconnect() and releasePort() — the only difference between them is
+  // whether ondisconnect() fires afterward.
+  _teardownSocket() {
+    this._closed = true;
+    if (this._bindRetryTimer) { clearTimeout(this._bindRetryTimer); this._bindRetryTimer = null; }
     for (const entry of this._pending.values()) clearTimeout(entry.timer);
     this._pending.clear();
     if (this._socket) {
       try { this._socket.close(); } catch (e) {}
       this._socket = null;
     }
+  }
+
+  disconnect() {
+    this._teardownSocket();
     if (this.ondisconnect) this.ondisconnect();
+  }
+
+  // Immediately give up the OS port, without going through the normal
+  // disconnect() event flow that JsSIP interprets as a transport-state
+  // transition. JsSIP itself only calls disconnect() once its own graceful
+  // un-REGISTER exchange finishes (ua.stop() sends un-REGISTER and waits on
+  // it before tearing down the transport) — that can take well over a
+  // second, during which this socket is still bound. A caller that's
+  // abandoning this instance outright to build a replacement (re-register,
+  // IP change) needs the port back immediately, not once that exchange
+  // eventually completes; the abandoned un-REGISTER just lapses, same as
+  // any registration naturally expiring after register_expires.
+  releasePort() {
+    this._teardownSocket();
   }
 
   send(message) {
