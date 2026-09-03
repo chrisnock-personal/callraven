@@ -21,6 +21,7 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
       - run: npm run lint
+      - run: npm test
 
   docker-build-and-test:
     runs-on: ubuntu-latest
