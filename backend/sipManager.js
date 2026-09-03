@@ -57,20 +57,10 @@ const os             = require('os');
 const fs             = require('fs');
 const path           = require('path');
 const captureManager = require('./captureManager');
+const { clamp16 }    = require('./pcmUtils');
 const callHistory    = require('./callHistory');
 const { AudioWriter } = require('./audioDecoder');
 const { NoiseSuppressor } = require('./noiseSuppressor');
-
-// Global toggle for real-time noise suppression on decoded inbound audio
-// (browser /audio relay). Read by RtpBridge at construction time and pushed
-// to live instances via SipManager.setNoiseSuppression(). Unlike the other
-// feature toggles in server.js's `settings` object — which only take effect
-// on the next call and so live there alone — this one is pushed live to an
-// active RtpBridge, which needs its own copy per bridge instance. This
-// module-level value and server.js's settings.noiseSuppressionEnabled must
-// only ever be changed together, through SipManager.setNoiseSuppression();
-// server.js's POST /api/settings handler is the only current caller.
-let noiseSuppressionEnabled = true;
 
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
@@ -275,7 +265,7 @@ function convertToUlaw8k(raw, fmt) {
       sample = Math.round(s0 + frac * (s1 - s0));
     }
 
-    out[i] = pcmToUlaw(Math.max(-32768, Math.min(32767, sample)));
+    out[i] = pcmToUlaw(clamp16(sample));
   }
 
   return out;
@@ -285,7 +275,7 @@ function convertToUlaw8k(raw, fmt) {
 
 // ─── RTP bridge ──────────────────────────────────────────────────────────────
 class RtpBridge {
-  constructor(localPort, remoteIp, remotePort, callId) {
+  constructor(localPort, remoteIp, remotePort, callId, nsEnabled = true) {
     this.localPort   = localPort;
     this.remoteIp    = remoteIp;
     this.remotePort  = remotePort;
@@ -320,25 +310,20 @@ class RtpBridge {
     // Noise suppression on decoded inbound PCM (browser /audio relay only —
     // recordings and live transcription read raw/undecoded audio upstream
     // of this, so they're unaffected). One instance per sample rate, created
-    // lazily on first use.
-    this.nsEnabled = noiseSuppressionEnabled;
-    this._ns8      = null;
-    this._ns16     = null;
+    // lazily on first use and keyed by sample rate since 8kHz (PCMU/PCMA)
+    // and 16kHz (G.722) are the only rates ever seen.
+    this.nsEnabled = nsEnabled;
+    this._ns = {};
   }
 
   setNoiseSuppression(enabled) {
     this.nsEnabled = !!enabled;
-    if (this._ns8)  this._ns8.setEnabled(this.nsEnabled);
-    if (this._ns16) this._ns16.setEnabled(this.nsEnabled);
+    for (const ns of Object.values(this._ns)) ns.setEnabled(this.nsEnabled);
   }
 
   _suppressNoise(sampleRate, pcm16) {
-    if (sampleRate === 16000) {
-      if (!this._ns16) this._ns16 = new NoiseSuppressor(16000, { enabled: this.nsEnabled });
-      return this._ns16.process(pcm16);
-    }
-    if (!this._ns8) this._ns8 = new NoiseSuppressor(8000, { enabled: this.nsEnabled });
-    return this._ns8.process(pcm16);
+    if (!this._ns[sampleRate]) this._ns[sampleRate] = new NoiseSuppressor(sampleRate, { enabled: this.nsEnabled });
+    return this._ns[sampleRate].process(pcm16);
   }
 
   start() {
@@ -598,6 +583,16 @@ class RtpBridge {
     if (this._rxWatchTimer) { clearInterval(this._rxWatchTimer); this._rxWatchTimer = null; }
   }
 
+  // Suppress noise on decoded PCM and relay it to onAudio, if attached.
+  // Suppression buffers internally, so a hop that hasn't filled yet yields
+  // an empty buffer — skip it rather than forward a zero-sample frame (the
+  // browser's Web Audio API throws on a 0-length AudioBuffer).
+  _emitAudio(pt, sampleRate, pcm16) {
+    if (!this.onAudio) return;
+    const suppressed = this._suppressNoise(sampleRate, pcm16);
+    if (suppressed.length > 0) this.onAudio(pt, suppressed);
+  }
+
   // Decode inbound RTP payload to 16-bit PCM and relay to onAudio callback
   _relayAudio(pt, payload) {
     try {
@@ -612,14 +607,10 @@ class RtpBridge {
           this._g722dec = new G722Decoder();
           this._g722dec.on('pcm', (pcm) => {
             try {
-              if (this.onAudio && !this.held) {
-                // Suppression buffers internally, so a hop that hasn't
-                // filled yet yields an empty buffer — skip it rather than
-                // forward a zero-sample frame (the browser's Web Audio API
-                // throws on a 0-length AudioBuffer).
-                const suppressed = this._suppressNoise(16000, pcm);
-                if (suppressed.length > 0) this.onAudio(9, suppressed);
-              }
+              // held is re-checked here (unlike the synchronous PCMU/PCMA
+              // path below) because decoding is asynchronous — this fires
+              // after ffmpeg returns, by which point a hold may have started.
+              if (!this.held) this._emitAudio(9, 16000, pcm);
             } catch (e) { /* non-fatal — mirrors the try/catch around the PCMU/PCMA path below */ }
           });
         }
@@ -632,7 +623,7 @@ class RtpBridge {
           const u = ~payload[i] & 0xff;
           const sign = u & 0x80, exp = (u >> 4) & 0x07, mant = u & 0x0f;
           let s = ((mant << 1) + 33) << (exp + 2);
-          pcm16.writeInt16LE(Math.max(-32768, Math.min(32767, sign ? -s : s)), i * 2);
+          pcm16.writeInt16LE(clamp16(sign ? -s : s), i * 2);
         }
       } else if (pt === 8) {
         // PCMA (A-law) → 8kHz 16-bit PCM
@@ -642,13 +633,10 @@ class RtpBridge {
           const sign = a & 0x80, exp = (a >> 4) & 0x07, mant = a & 0x0f;
           let s = exp === 0 ? (mant << 1) + 1 : (((mant | 0x10) << 1) + 1) << (exp - 1);
           s *= 8;
-          pcm16.writeInt16LE(Math.max(-32768, Math.min(32767, sign ? -s : s)), i * 2);
+          pcm16.writeInt16LE(clamp16(sign ? -s : s), i * 2);
         }
       } else { return; }
-      if (this.onAudio) {
-        const suppressed = this._suppressNoise(8000, pcm16);
-        if (suppressed.length > 0) this.onAudio(pt, suppressed);
-      }
+      this._emitAudio(pt, 8000, pcm16);
     } catch (e) { /* non-fatal */ }
   }
 
@@ -713,6 +701,12 @@ class SipManager extends EventEmitter {
     this.keepaliveTimer   = null;
     this.ipWatchTimer     = null;
     this.lastKnownIp      = null;
+    // Sole source of truth for the noise-suppression toggle — pushed live to
+    // any active RtpBridge and passed to bridges created for future calls.
+    // Unlike the other feature toggles (owned by server.js's `settings`
+    // object, taking effect only on the next call), this one needs to be
+    // readable here since it's pushed to a live bridge immediately.
+    this.noiseSuppressionEnabled = true;
   }
 
   _log(level, message) {
@@ -1299,7 +1293,7 @@ class SipManager extends EventEmitter {
     if (this.rtpBridge) this.rtpBridge.stop();
     const localPort = this.activeCall?.localRtpPort || allocateRtpPort();
     const callId    = this.activeCall?.callId;
-    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId);
+    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled);
 
     this.rtpBridge.start();
   }
@@ -1356,10 +1350,14 @@ class SipManager extends EventEmitter {
   // would never actually run on it; calling setNoiseSuppression on it too
   // would just be misleading dead code implying otherwise.
   setNoiseSuppression(enabled) {
-    noiseSuppressionEnabled = !!enabled;
-    if (this.rtpBridge) this.rtpBridge.setNoiseSuppression(noiseSuppressionEnabled);
-    this._log('info', `Noise suppression ${noiseSuppressionEnabled ? 'enabled' : 'disabled'}`);
-    return noiseSuppressionEnabled;
+    this.noiseSuppressionEnabled = !!enabled;
+    if (this.rtpBridge) this.rtpBridge.setNoiseSuppression(this.noiseSuppressionEnabled);
+    this._log('info', `Noise suppression ${this.noiseSuppressionEnabled ? 'enabled' : 'disabled'}`);
+    return this.noiseSuppressionEnabled;
+  }
+
+  getNoiseSuppression() {
+    return this.noiseSuppressionEnabled;
   }
 
   unregister() {
@@ -1820,7 +1818,7 @@ class SipManager extends EventEmitter {
             const remote = parseRemoteSdp(remoteSdp);
             if (remote) {
               this._log('info', `Conference RTP: remote=${remote.ip}:${remote.port}`);
-              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId);
+              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId, this.noiseSuppressionEnabled);
               this.confBridge.start();
 
               // Cross-wire: forward packets from leg1 to leg2 and vice versa

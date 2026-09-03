@@ -19,6 +19,8 @@
 
 'use strict';
 
+const { clamp16 } = require('./pcmUtils');
+
 function nextPow2(n) {
   let p = 1;
   while (p < n) p <<= 1;
@@ -163,7 +165,7 @@ class NoiseSuppressor {
     let off = 0;
     for (const chunk of outChunks) {
       for (let i = 0; i < chunk.length; i++) {
-        const s = Math.max(-32768, Math.min(32767, Math.round(chunk[i] * 32768)));
+        const s = clamp16(Math.round(chunk[i] * 32768));
         out.writeInt16LE(s, off);
         off += 2;
       }
