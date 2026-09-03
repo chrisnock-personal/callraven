@@ -146,6 +146,32 @@ volumes:
 
 ---
 
+## Testing
+
+Unit tests for pure-logic backend modules (e.g. `noiseSuppressor.js`) live in `backend/test/` and run via Node's built-in test runner, no container required:
+
+```bash
+cd backend && npm test
+```
+
+Full end-to-end testing exercises the REST API against a running container, using the Python scripts in `Sample Scripts/`:
+
+```bash
+# Single-call test (you answer on a remote device)
+python3 "Sample Scripts/sip_call_test.py" --ep1-url http://localhost:3000 \
+  --sip-server 192.0.2.10 --ep1-user 1112 --ep1-pass secret --target 1113
+
+# P2P test (two local containers call each other)
+python3 "Sample Scripts/sip_call_p2p_test.py"
+
+# IVR/automation test
+python3 "Sample Scripts/sip_call_ivr_test.py"
+```
+
+CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus a Docker build, boot smoke test, and a P2P call test against a throwaway Asterisk container.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
