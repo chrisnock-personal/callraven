@@ -183,12 +183,15 @@ captureManager.on('captureReady', (data) => {
 // ─── Feature toggles ────────────────────────────────────────────────────────
 // captureEnabled/liveTranscriptEnabled default on, matching prior always-on
 // behaviour. autoRecordEnabled defaults off, since on-demand recording has
-// always been opt-in per call. All are global settings, not per-call — they
-// take effect on the next call.
+// always been opt-in per call. All are global settings, not per-call.
+// captureEnabled/liveTranscriptEnabled/autoRecordEnabled only take effect on
+// the next call; noiseSuppressionEnabled is the exception — it's pushed to
+// any live bridge immediately (see sipManager.setNoiseSuppression()).
 const settings = {
-  captureEnabled:        true,
-  liveTranscriptEnabled: true,
-  autoRecordEnabled:     false,
+  captureEnabled:          true,
+  liveTranscriptEnabled:   true,
+  autoRecordEnabled:       false,
+  noiseSuppressionEnabled: true,
 };
 
 // ─── REST API ─────────────────────────────────────────────────────────────────
@@ -198,10 +201,13 @@ app.get('/api/status', (req, res) => res.json(sipManager.getState()));
 app.get('/api/settings', (req, res) => res.json(settings));
 
 app.post('/api/settings', (req, res) => {
-  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled } = req.body;
-  if (typeof captureEnabled === 'boolean')        settings.captureEnabled        = captureEnabled;
-  if (typeof liveTranscriptEnabled === 'boolean') settings.liveTranscriptEnabled = liveTranscriptEnabled;
-  if (typeof autoRecordEnabled === 'boolean')     settings.autoRecordEnabled     = autoRecordEnabled;
+  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled } = req.body;
+  if (typeof captureEnabled === 'boolean')          settings.captureEnabled          = captureEnabled;
+  if (typeof liveTranscriptEnabled === 'boolean')   settings.liveTranscriptEnabled   = liveTranscriptEnabled;
+  if (typeof autoRecordEnabled === 'boolean')       settings.autoRecordEnabled       = autoRecordEnabled;
+  if (typeof noiseSuppressionEnabled === 'boolean') {
+    settings.noiseSuppressionEnabled = sipManager.setNoiseSuppression(noiseSuppressionEnabled);
+  }
   res.json(settings);
 });
 

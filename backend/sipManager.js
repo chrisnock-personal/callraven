@@ -59,6 +59,18 @@ const path           = require('path');
 const captureManager = require('./captureManager');
 const callHistory    = require('./callHistory');
 const { AudioWriter } = require('./audioDecoder');
+const { NoiseSuppressor } = require('./noiseSuppressor');
+
+// Global toggle for real-time noise suppression on decoded inbound audio
+// (browser /audio relay). Read by RtpBridge at construction time and pushed
+// to live instances via SipManager.setNoiseSuppression(). Unlike the other
+// feature toggles in server.js's `settings` object — which only take effect
+// on the next call and so live there alone — this one is pushed live to an
+// active RtpBridge, which needs its own copy per bridge instance. This
+// module-level value and server.js's settings.noiseSuppressionEnabled must
+// only ever be changed together, through SipManager.setNoiseSuppression();
+// server.js's POST /api/settings handler is the only current caller.
+let noiseSuppressionEnabled = true;
 
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
@@ -305,6 +317,28 @@ class RtpBridge {
     this.audioWriter = null;  // inbound (remote) recorder
     this.txWriter    = null;  // outbound (local WAV playback) recorder
     this._g722dec   = null;
+    // Noise suppression on decoded inbound PCM (browser /audio relay only —
+    // recordings and live transcription read raw/undecoded audio upstream
+    // of this, so they're unaffected). One instance per sample rate, created
+    // lazily on first use.
+    this.nsEnabled = noiseSuppressionEnabled;
+    this._ns8      = null;
+    this._ns16     = null;
+  }
+
+  setNoiseSuppression(enabled) {
+    this.nsEnabled = !!enabled;
+    if (this._ns8)  this._ns8.setEnabled(this.nsEnabled);
+    if (this._ns16) this._ns16.setEnabled(this.nsEnabled);
+  }
+
+  _suppressNoise(sampleRate, pcm16) {
+    if (sampleRate === 16000) {
+      if (!this._ns16) this._ns16 = new NoiseSuppressor(16000, { enabled: this.nsEnabled });
+      return this._ns16.process(pcm16);
+    }
+    if (!this._ns8) this._ns8 = new NoiseSuppressor(8000, { enabled: this.nsEnabled });
+    return this._ns8.process(pcm16);
   }
 
   start() {
@@ -572,7 +606,16 @@ class RtpBridge {
         if (!this._g722dec) {
           this._g722dec = new G722Decoder();
           this._g722dec.on('pcm', (pcm) => {
-            if (this.onAudio && !this.held) this.onAudio(9, pcm);
+            try {
+              if (this.onAudio && !this.held) {
+                // Suppression buffers internally, so a hop that hasn't
+                // filled yet yields an empty buffer — skip it rather than
+                // forward a zero-sample frame (the browser's Web Audio API
+                // throws on a 0-length AudioBuffer).
+                const suppressed = this._suppressNoise(16000, pcm);
+                if (suppressed.length > 0) this.onAudio(9, suppressed);
+              }
+            } catch (e) { /* non-fatal — mirrors the try/catch around the PCMU/PCMA path below */ }
           });
         }
         this._g722dec.write(payload);
@@ -597,7 +640,10 @@ class RtpBridge {
           pcm16.writeInt16LE(Math.max(-32768, Math.min(32767, sign ? -s : s)), i * 2);
         }
       } else { return; }
-      if (this.onAudio) this.onAudio(pt, pcm16);
+      if (this.onAudio) {
+        const suppressed = this._suppressNoise(8000, pcm16);
+        if (suppressed.length > 0) this.onAudio(pt, suppressed);
+      }
     } catch (e) { /* non-fatal */ }
   }
 
@@ -1294,6 +1340,21 @@ class SipManager extends EventEmitter {
     this.autoAnswer = { enabled: !!enabled, delayMs: Math.max(0, parseInt(delayMs) || 0) };
     this._log('info', `Auto-answer ${enabled ? `enabled (delay: ${delayMs}ms)` : 'disabled'}`);
     return this.autoAnswer;
+  }
+
+  // Toggle real-time noise suppression on decoded inbound audio (browser
+  // /audio relay). Applies immediately to any live bridge, and persists as
+  // the default for bridges created by future calls.
+  //
+  // Only rtpBridge is touched here — confBridge.onAudio is never assigned
+  // (the conference second leg isn't relayed to the browser), so suppression
+  // would never actually run on it; calling setNoiseSuppression on it too
+  // would just be misleading dead code implying otherwise.
+  setNoiseSuppression(enabled) {
+    noiseSuppressionEnabled = !!enabled;
+    if (this.rtpBridge) this.rtpBridge.setNoiseSuppression(noiseSuppressionEnabled);
+    this._log('info', `Noise suppression ${noiseSuppressionEnabled ? 'enabled' : 'disabled'}`);
+    return noiseSuppressionEnabled;
   }
 
   unregister() {

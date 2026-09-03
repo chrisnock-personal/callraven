@@ -1442,6 +1442,16 @@
             <span class="slider"></span>
           </label>
         </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Noise suppression</div>
+            <div class="settings-hint">Suppress background noise on inbound audio (Listen &amp; live playback)</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="setting-noise-suppression" checked onchange="updateSetting('noiseSuppressionEnabled', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
 
       <div class="api-ref collapsed" id="api-ref">
@@ -3162,9 +3172,10 @@ function _capStopAudio(idx) {
 async function loadSettings() {
   const r = await api('GET', '/api/settings');
   if (r.error) return;
-  document.getElementById('setting-capture').checked    = r.captureEnabled;
-  document.getElementById('setting-transcript').checked = r.liveTranscriptEnabled;
-  document.getElementById('setting-autorecord').checked = r.autoRecordEnabled;
+  document.getElementById('setting-capture').checked            = r.captureEnabled;
+  document.getElementById('setting-transcript').checked         = r.liveTranscriptEnabled;
+  document.getElementById('setting-autorecord').checked         = r.autoRecordEnabled;
+  document.getElementById('setting-noise-suppression').checked  = r.noiseSuppressionEnabled;
 }
 
 async function updateSetting(key, value) {
