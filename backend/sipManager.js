@@ -566,7 +566,12 @@ class RtpBridge {
     if (this.silenceTimer) return;
     const codec = this.stats.codec || '';
     const isG722 = codec.includes('G722');
-    const frame  = isG722 ? Buffer.alloc(160, 0x00) : Buffer.alloc(160, 0x7f);
+    // G.722 is ADPCM, not a direct log-PCM table like μ-law — 0x00 is NOT
+    // silence there (verified: ffmpeg's own G.722 encoder settles on 0xFA
+    // for a true-silence input; feeding it 0x00 instead decodes back out
+    // as a sustained near-full-scale signal, confirmed both standalone and
+    // following real audio, independent of any Node-side pipe timing).
+    const frame  = isG722 ? Buffer.alloc(160, 0xfa) : Buffer.alloc(160, 0x7f);
     this.silenceTimer = setInterval(() => {
       if (!this.socket || this.playing || this.held) { this._stopSilence(); return; }
       if (isG722) this.sendRtpG722(frame);
