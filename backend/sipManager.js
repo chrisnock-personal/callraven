@@ -1054,6 +1054,61 @@ class SipManager extends EventEmitter {
     this._anonymousUa = false;
   }
 
+  // Extracts the {localUri, remoteUri, callId, localTag, remoteTag, cseq}
+  // fields raw SIP request construction needs from a JsSIP dialog, using the
+  // most defensive fallback chain of the three call sites this used to be
+  // duplicated across (dialog.id vs dialog._id, call_id vs dialog.call_id,
+  // etc. — JsSIP's dialog shape has drifted across versions/code paths).
+  _dialogFields(dialog, cseqOffset = 0) {
+    const uriToStr = (u) => {
+      if (!u) return null;
+      if (typeof u === 'string') return u;
+      if (typeof u.toString === 'function') {
+        const s = u.toString();
+        if (s && s !== '[object Object]' && s.includes('sip:')) return s;
+      }
+      if (u.uri) return uriToStr(u.uri);
+      return null;
+    };
+    const server    = this.config?.server || '';
+    const localUri  = uriToStr(dialog.local_uri) || `sip:${this.config?.username}@${server}`;
+    const remoteUri = uriToStr(dialog.remote_uri) || uriToStr(dialog._remote_uri)
+                   || this.activeCall?.target || `sip:unknown@${server}`;
+    const dialogId  = dialog.id || dialog._id || {};
+    const callId    = String(dialogId.call_id   || dialog.call_id   || '');
+    const localTag  = String(dialogId.local_tag  || dialog.local_tag  || '');
+    const remoteTag = String(dialogId.remote_tag || dialog.remote_tag || '');
+    const cseq      = (dialog.local_seqnum || dialog._local_seqnum || 1) + cseqOffset;
+    return { localUri, remoteUri, callId, localTag, remoteTag, cseq };
+  }
+
+  // Assembles a raw SIP request string (Via/Max-Forwards/From/To/Call-ID/CSeq
+  // plus any extraHeaders and an optional body) from dialog-derived fields.
+  // Shared by two different uses: reconstructing ACK/BYE purely for pcap
+  // capture (JsSIP sends those itself via its own internal machinery, which
+  // doesn't reliably expose them for capture — see _hookSessionCapture's
+  // 'confirmed' handler and _captureOutboundBye), and _sendRawReInvite, which
+  // builds AND actually transmits the message, bypassing JsSIP's own
+  // re-INVITE/WebRTC-oriented call path for hold/resume.
+  _buildSipMessage(method, dialog, { cseqOffset = 0, extraHeaders = [], body = null } = {}) {
+    const { localUri, remoteUri, callId, localTag, remoteTag, cseq } = this._dialogFields(dialog, cseqOffset);
+    const localIp      = this.activeCall?.localIp || getLocalIp();
+    const viaTransport  = this.ua?._transport?.socket?.via_transport || 'WS';
+    return [
+      `${method} ${remoteUri} SIP/2.0`,
+      `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
+      `Max-Forwards: 70`,
+      `From: <${localUri}>;tag=${localTag}`,
+      `To: <${remoteUri}>;tag=${remoteTag}`,
+      `Call-ID: ${callId}`,
+      `CSeq: ${cseq} ${method}`,
+      ...extraHeaders,
+      `Content-Length: ${body ? Buffer.byteLength(body) : 0}`,
+      '',
+      body || ''
+    ].join('\r\n');
+  }
+
   // ── SIP capture via JsSIP session events ─────────────────────────────────
   // Capture SIP signalling by listening to JsSIP session events which expose
   // the raw SIP message objects — far more reliable than intercepting WebSocket.
@@ -1116,40 +1171,17 @@ class SipManager extends EventEmitter {
 
     session.on('confirmed', (e) => {
       // 200 OK captured via WebSocket message listener above
-      // ACK: build from dialog state (same approach as BYE)
+      // ACK: build from dialog state (JsSIP sends the real ACK internally
+      // without exposing it for capture — same reason _captureOutboundBye
+      // exists for BYE)
       const callId  = this._pendingCallId || this.activeCall?.callId;
       if (!callId) return;
       const localIp = getLocalIp();
       const server  = this.config?.server || '';
       try {
-        const dialog    = session._dialog;
+        const dialog = session._dialog;
         if (!dialog) return;
-        const uriToStr  = (u) => {
-          if (!u) return null;
-          if (typeof u === 'string' && u.includes('sip:')) return u;
-          try { const s = u.toString(); if (s.includes('sip:')) return s; } catch(ex) {}
-          return null;
-        };
-        const localUri  = uriToStr(dialog.local_uri)  || `sip:${this.config.username}@${server}`;
-        const remoteUri = uriToStr(dialog.remote_uri)  || this.activeCall?.target || `sip:unknown@${server}`;
-        const dialogId  = dialog.id || {};
-        const callIdSip = String(dialogId.call_id   || '');
-        const localTag  = String(dialogId.local_tag  || '');
-        const remoteTag = String(dialogId.remote_tag || '');
-        const cseq      = (dialog.local_seqnum || 1);
-        const viaTransport = this.ua?._transport?.socket?.via_transport || 'WS';
-        const CRLF      = '\r\n';
-        const ackText   = [
-          `ACK ${remoteUri} SIP/2.0`,
-          `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
-          `Max-Forwards: 70`,
-          `From: <${localUri}>;tag=${localTag}`,
-          `To: <${remoteUri}>;tag=${remoteTag}`,
-          `Call-ID: ${callIdSip}`,
-          `CSeq: ${cseq} ACK`,
-          `Content-Length: 0`,
-          ``, ``
-        ].join(CRLF);
+        const ackText = this._buildSipMessage('ACK', dialog);
         captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, ackText);
         this._log('info', `[CAP] ACK written (${ackText.slice(0,30)})`);
       } catch(ex) { this._log('warn', `[CAP] ACK capture error: ${ex.message}`); }
