@@ -1598,47 +1598,9 @@ class SipManager extends EventEmitter {
       const dialog = this.session?._dialog;
       if (!dialog) return;
 
-      // JsSIP stores URIs as objects with toString() — call it explicitly
-      // Also check multiple property paths across JsSIP versions
-      const uriToStr = (u) => {
-        if (!u) return null;
-        if (typeof u === 'string') return u;
-        if (typeof u.toString === 'function') {
-          const s = u.toString();
-          if (s && s !== '[object Object]' && s.includes('sip:')) return s;
-        }
-        if (u.uri) return uriToStr(u.uri);
-        return null;
-      };
-
-      const localUri  = uriToStr(dialog.local_uri)  || `sip:${this.config.username}@${server}`;
-      const remoteUri = uriToStr(dialog.remote_uri)
-                     || uriToStr(dialog._remote_uri)
-                     || this.activeCall?.target
-                     || `sip:unknown@${server}`;
-
-      // Dialog ID can be in different places depending on JsSIP version
-      const dialogId  = dialog.id || dialog._id || {};
-      const callIdSip = String(dialogId.call_id  || dialog.call_id  || '');
-      const localTag  = String(dialogId.local_tag || dialog.local_tag || '');
-      const remoteTag = String(dialogId.remote_tag|| dialog.remote_tag|| '');
-      const cseq      = (dialog.local_seqnum || dialog._local_seqnum || 1) + 1;
-
+      const { localUri, remoteUri, cseq } = this._dialogFields(dialog, 1);
       this._log('info', `[CAP] BYE dialog: remote=${remoteUri} local=${localUri} cseq=${cseq}`);
-      const viaTransport = this.ua?._transport?.socket?.via_transport || 'WS';
-      const CRLF      = '\r\n';
-      const byeText   = [
-        `BYE ${remoteUri} SIP/2.0`,
-        `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
-        `Max-Forwards: 70`,
-        `From: <${localUri}>;tag=${localTag}`,
-        `To: <${remoteUri}>;tag=${remoteTag}`,
-        `Call-ID: ${callIdSip}`,
-        `CSeq: ${cseq} BYE`,
-        `Content-Length: 0`,
-        ``,
-        ``
-      ].join(CRLF);
+      const byeText = this._buildSipMessage('BYE', dialog, { cseqOffset: 1 });
       const written = captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, byeText);
       this._log('info', `[CAP] Outbound BYE ${written ? 'written to pcap' : 'FAILED'} callId=${callId?.slice(0,8)} byeLen=${byeText.length} firstLine=${byeText.split('\r\n')[0]}`);
     } catch(e) {
@@ -1717,39 +1679,25 @@ class SipManager extends EventEmitter {
     const dialog = this.session?._dialog;
     if (!dialog) throw new Error('No SIP dialog');
 
-    const localUri  = String(dialog.local_uri  || `sip:${this.config.username}@${this.config.server}`);
-    const remoteUri = String(dialog.remote_uri || this.activeCall?.target || '');
-    const callId    = String(dialog.id?.call_id   || '');
-    const localTag  = String(dialog.id?.local_tag  || '');
-    const remoteTag = String(dialog.id?.remote_tag || '');
-    const cseq      = (dialog.local_seqnum || 1) + 1;
-    const routeSet  = (dialog.route_set || []).map(r => `Route: ${r}`).filter(Boolean);
-
     const transport = this.ua?._transport;
     if (!transport || !transport.socket) throw new Error('No transport');
-    const viaTransport = transport.socket.via_transport || 'WS';
 
-    const msg = [
-      `INVITE ${remoteUri} SIP/2.0`,
-      `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
-      `Max-Forwards: 70`,
-      `From: <${localUri}>;tag=${localTag}`,
-      `To: <${remoteUri}>;tag=${remoteTag}`,
-      `Call-ID: ${callId}`,
-      `CSeq: ${cseq} INVITE`,
-      `Contact: <sip:${this.config.username}@${localIp}>`,
-      ...routeSet,
-      `Content-Type: application/sdp`,
-      `Content-Length: ${Buffer.byteLength(sdp)}`,
-      ``,
-      sdp
-    ].join('\r\n');
+    const routeSet = (dialog.route_set || []).map(r => `Route: ${r}`).filter(Boolean);
+    const msg = this._buildSipMessage('INVITE', dialog, {
+      cseqOffset: 1,
+      extraHeaders: [
+        `Contact: <sip:${this.config.username}@${localIp}>`,
+        ...routeSet,
+        `Content-Type: application/sdp`,
+      ],
+      body: sdp,
+    });
 
     // transport.socket is always the exact object passed to `sockets:[...]`
     // (WebSocketInterface or UdpSocketInterface) — its send() return value
     // tells us whether the transport is actually open, for both alike.
     if (!transport.socket.send(msg)) throw new Error('Transport not open');
-    this._log('info', `Sent raw re-INVITE (hold=${hold}, cseq=${cseq})`);
+    this._log('info', `Sent raw re-INVITE (hold=${hold}, cseq=${this._dialogFields(dialog, 1).cseq})`);
   }
 
 
