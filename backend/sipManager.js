@@ -830,8 +830,18 @@ class SipManager extends EventEmitter {
         }
       };
       if (contactUri) uaOptions.contact_uri = contactUri;
-      this.ua = new JsSIP.UA(uaOptions);
-      this.ua.on('registered', () => {
+      const ua = this.ua = new JsSIP.UA(uaOptions);
+      // Guard every handler against events from an abandoned UA. Stopping a
+      // *registered* UA makes JsSIP send un-REGISTER and delay tearing down
+      // its transport until that exchange settles (up to a couple seconds —
+      // see UA.stop()/Registrator.onTransportClosed() in jssip's lib) — well
+      // after this.ua has already moved on to a replacement (re-register,
+      // IP change). Without this check, that late 'unregistered' would still
+      // flip the singleton's `registered` flag to false and broadcast a
+      // spurious unregistered event even though the new UA is registered.
+      const isCurrent = () => this.ua === ua;
+      ua.on('registered', () => {
+        if (!isCurrent()) return;
         this.registered = true;
         this._log('info', `Registered as ${username}@${server}`);
         this.emit('registered', { username, server, displayName });
@@ -839,15 +849,22 @@ class SipManager extends EventEmitter {
         this._startIpWatch();
         resolve({ registered: true });
       });
-      this.ua.on('unregistered', () => { this.registered = false; this._log('info', 'Unregistered'); this.emit('unregistered', {}); });
-      this.ua.on('registrationFailed', (data) => {
+      ua.on('unregistered', () => {
+        if (!isCurrent()) return;
+        this.registered = false;
+        this._log('info', 'Unregistered');
+        this.emit('unregistered', {});
+      });
+      ua.on('registrationFailed', (data) => {
+        if (!isCurrent()) return;
         this.registered = false;
         const cause = data.cause || 'Unknown';
         this._log('error', `Registration failed: ${cause}`);
         this.emit('registrationFailed', { cause });
         reject(new Error(`Registration failed: ${cause}`));
       });
-      this.ua.on('connected',    () => {
+      ua.on('connected',    () => {
+        if (!isCurrent()) return;
         this._log('info', `Connected to ${connectLabel}`);
         // Hook the transport's raw message stream to capture 100/180/200
         // responses (JsSIP doesn't expose these on session events for
@@ -855,8 +872,8 @@ class SipManager extends EventEmitter {
         // a direct callback instead. See _hookTransportCapture().
         this._hookTransportCapture();
       });
-      this.ua.on('disconnected', (e) => this._log('warn', `Transport disconnected: ${e?.cause || ''}`));
-      this.ua.on('newRTCSession', (data) => this._handleNewSession(data.session));
+      ua.on('disconnected', (e) => { if (isCurrent()) this._log('warn', `Transport disconnected: ${e?.cause || ''}`); });
+      ua.on('newRTCSession', (data) => { if (isCurrent()) this._handleNewSession(data.session); });
 
       this.ua.start();
       setTimeout(() => { if (!this.registered) reject(new Error('Registration timeout after 30s')); }, 30000);
@@ -1028,12 +1045,17 @@ class SipManager extends EventEmitter {
         }
       };
       if (contactUri) uaOptions.contact_uri = contactUri;
-      this.ua = new JsSIP.UA(uaOptions);
+      const ua = this.ua = new JsSIP.UA(uaOptions);
       this.config = { server: domain, username: localUser, displayName, transport, port: opts.port, wsPort: opts.wsPort, wsPath: opts.wsPath };
       this._anonymousUa = true;
 
+      // Same stale-UA guard as register() — ua.stop() can delay transport
+      // teardown (draining an in-progress session/transaction) well past
+      // the point this.ua has already moved on to a replacement.
+      const isCurrent = () => this.ua === ua;
       let settled = false;
-      this.ua.on('connected', () => {
+      ua.on('connected', () => {
+        if (!isCurrent()) return;
         this._log('info', `Connected to ${connectLabel}`);
         this._hookTransportCapture();
         if (settled) return;
@@ -1043,8 +1065,8 @@ class SipManager extends EventEmitter {
           reject(err);
         });
       });
-      this.ua.on('disconnected', (e) => this._log('warn', `Transport disconnected: ${e?.cause || ''}`));
-      this.ua.on('newRTCSession', (data) => this._handleNewSession(data.session));
+      ua.on('disconnected', (e) => { if (isCurrent()) this._log('warn', `Transport disconnected: ${e?.cause || ''}`); });
+      ua.on('newRTCSession', (data) => { if (isCurrent()) this._handleNewSession(data.session); });
 
       this.ua.start();
       setTimeout(() => {

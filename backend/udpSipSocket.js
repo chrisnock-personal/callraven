@@ -17,13 +17,17 @@ const T1 = 500;
 const T2 = 4000;
 const MAX_ELAPSED = 32000;
 
-// A re-register (stop() immediately followed by start() on a fresh UA/socket
-// instance, e.g. on OPTIONS-keepalive failure or an IP change) tears down
-// the old dgram socket and binds a new one to the same SIP_PORT right away.
-// dgram's close() releases the OS port asynchronously, so the rebind can
-// lose that race and fail with EADDRINUSE even though nothing else is
-// actually holding the port. Retry briefly rather than surfacing a
-// permanent connect failure for what's normally a sub-millisecond gap.
+// Defensive backstop for binding to a port that's still (briefly) held by a
+// socket this process is in the middle of tearing down — e.g. a reconnect
+// path that doesn't go through sipManager.register()'s explicit
+// releasePreviousTransport() (see that method's comment for the primary
+// fix and why this alone isn't enough: JsSIP's own graceful teardown of a
+// *registered* UA can leave the old socket bound for a couple seconds, well
+// past a plain OS-level close()/rebind race). Note this does NOT cover the
+// OPTIONS-keepalive-failure or IP-change re-register triggers in
+// sipManager.js — both call JsSIP's lightweight ua.register() (a REGISTER
+// refresh on the existing transport), which never rebuilds this socket at
+// all, so nothing here or in releasePreviousTransport() runs for them.
 const BIND_RETRY_ATTEMPTS  = 10;
 const BIND_RETRY_DELAY_MS  = 100;
 
@@ -119,7 +123,15 @@ class UdpSocketInterface {
         }, BIND_RETRY_DELAY_MS);
         return;
       }
-      console.error(`[SIP/UDP] socket error: ${err.message}`);
+      console.error(`[SIP/UDP] socket error: ${err.message} (gave up after ${attempt + 1} bind attempt(s))`);
+      // Tell JsSIP the connect attempt failed outright, rather than leaving
+      // it waiting on onconnect() forever: Transport._onDisconnect()
+      // schedules its own reconnect via connection_recovery_min/max_interval
+      // (see Transport.js's _reconnect()), so this socket gets another shot
+      // once the port frees up instead of the caller's register() Promise
+      // just hanging silently until its own 30s timeout with no indication
+      // of what actually went wrong.
+      if (this.ondisconnect) this.ondisconnect(true, undefined, err.message);
     };
     socket.once('error', onBindError);
 
@@ -160,10 +172,11 @@ class UdpSocketInterface {
   // un-REGISTER exchange finishes (ua.stop() sends un-REGISTER and waits on
   // it before tearing down the transport) — that can take well over a
   // second, during which this socket is still bound. A caller that's
-  // abandoning this instance outright to build a replacement (re-register,
-  // IP change) needs the port back immediately, not once that exchange
-  // eventually completes; the abandoned un-REGISTER just lapses, same as
-  // any registration naturally expiring after register_expires.
+  // abandoning this instance outright to build a replacement (e.g.
+  // sipManager.register()'s explicit call via releasePreviousTransport())
+  // needs the port back immediately, not once that exchange eventually
+  // completes; the abandoned un-REGISTER just lapses, same as any
+  // registration naturally expiring after register_expires.
   releasePort() {
     this._teardownSocket();
   }
