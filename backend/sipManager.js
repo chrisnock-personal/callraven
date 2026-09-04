@@ -102,7 +102,9 @@ function getLocalIp() {
 // Codec preference order: G.722 (PT9) > PCMU (PT0) > PCMA (PT8)
 // G.722 is 16kHz wideband — RTP clock is 8000 per RFC 3551 (a historical quirk)
 // but actual audio is 16kHz ADPCM.
-function buildSdp(localIp, rtpPort) {
+// `hold: true` sends sendonly (tells the remote to stop sending RTP) instead
+// of the normal sendrecv.
+function buildSdp(localIp, rtpPort, { hold = false } = {}) {
   const id = Date.now();
   return [
     'v=0',
@@ -116,27 +118,7 @@ function buildSdp(localIp, rtpPort) {
     'a=rtpmap:8 PCMA/8000',
     'a=rtpmap:101 telephone-event/8000',
     'a=fmtp:101 0-16',
-    'a=sendrecv',
-    ''
-  ].join('\r\n');
-}
-
-// Hold SDP — sendonly tells remote to stop sending RTP
-function buildSdpHold(localIp, rtpPort) {
-  const id = Date.now();
-  return [
-    'v=0',
-    `o=CallRaven ${id} ${id} IN IP4 ${localIp}`,
-    's=CallRaven Call',
-    `c=IN IP4 ${localIp}`,
-    't=0 0',
-    `m=audio ${rtpPort} RTP/AVP 9 0 8 101`,
-    'a=rtpmap:9 G722/8000',
-    'a=rtpmap:0 PCMU/8000',
-    'a=rtpmap:8 PCMA/8000',
-    'a=rtpmap:101 telephone-event/8000',
-    'a=fmtp:101 0-16',
-    'a=sendonly',
+    hold ? 'a=sendonly' : 'a=sendrecv',
     ''
   ].join('\r\n');
 }
@@ -428,16 +410,18 @@ class RtpBridge {
     });
   }
 
-  // Send a PCMU RTP packet — all counters kept as unsigned 32-bit with >>> 0
-  sendRtp(payload) {
+  // Send an RTP packet for the given payload type — all counters kept as
+  // unsigned 32-bit with >>> 0. RTP timestamp increments by frame size per
+  // RFC 3551 §4.5.2 (applies to both PCMU, pt 0, and G.722, pt 9).
+  _sendRtpPacket(payload, pt) {
     if (!this.socket) return;
     try {
       this.seq       = (this.seq + 1) & 0xffff;
       this.timestamp = (this.timestamp + payload.length) >>> 0;
 
       const pkt = Buffer.alloc(12 + payload.length);
-      pkt[0] = 0x80; // V=2, P=0, X=0, CC=0
-      pkt[1] = 0x00; // M=0, PT=0 (PCMU)
+      pkt[0] = 0x80;  // V=2, P=0, X=0, CC=0
+      pkt[1] = pt;    // M=0, PT=pt
       pkt.writeUInt16BE(this.seq, 2);
       pkt.writeUInt32BE(this.timestamp >>> 0, 4);
       pkt.writeUInt32BE(this.ssrc >>> 0, 8);
@@ -451,35 +435,7 @@ class RtpBridge {
         this.remoteIp, this.remotePort, pkt
       );
     } catch (e) {
-      console.error(`[RTP] sendRtp error: ${e.message}`);
-    }
-  }
-
-  // Send a G.722 RTP packet (payload type 9)
-  // RTP timestamp increments by frame size per RFC 3551 §4.5.2
-  sendRtpG722(payload) {
-    if (!this.socket) return;
-    try {
-      this.seq       = (this.seq + 1) & 0xffff;
-      this.timestamp = (this.timestamp + payload.length) >>> 0;
-
-      const pkt = Buffer.alloc(12 + payload.length);
-      pkt[0] = 0x80; // V=2, P=0, X=0, CC=0
-      pkt[1] = 0x09; // M=0, PT=9 (G.722)
-      pkt.writeUInt16BE(this.seq, 2);
-      pkt.writeUInt32BE(this.timestamp >>> 0, 4);
-      pkt.writeUInt32BE(this.ssrc >>> 0, 8);
-      payload.copy(pkt, 12);
-
-      this.socket.send(pkt, this.remotePort, this.remoteIp);
-      this.stats.txPackets++;
-      this.stats.txBytes += pkt.length;
-      captureManager.writeRtpPacket(
-        this.callId, this.localIp, this.localPort,
-        this.remoteIp, this.remotePort, pkt
-      );
-    } catch (e) {
-      console.error(`[RTP] sendRtpG722 error: ${e.message}`);
+      console.error(`[RTP] _sendRtpPacket error (pt=${pt}): ${e.message}`);
     }
   }
 
@@ -523,7 +479,7 @@ class RtpBridge {
         const frame = g722data.slice(offset, offset + FRAME_BYTES);
         offset += FRAME_BYTES;
         // Send as PT 9 (G.722) — timestamp increments by 160 per RFC 3551
-        this.sendRtpG722(frame);
+        this._sendRtpPacket(frame, 9);
         // Write to outbound (tx) recorder — keeps playback separate from inbound
         if (this.recording && this.txWriter) {
           this.txWriter.write(9, frame);
@@ -559,8 +515,7 @@ class RtpBridge {
     const frame  = isG722 ? Buffer.alloc(160, 0xfa) : Buffer.alloc(160, 0x7f);
     this.silenceTimer = setInterval(() => {
       if (!this.socket || this.playing || this.held) { this._stopSilence(); return; }
-      if (isG722) this.sendRtpG722(frame);
-      else        this.sendRtp(frame);
+      this._sendRtpPacket(frame, isG722 ? 9 : 0);
     }, 20);
   }
 
@@ -774,6 +729,23 @@ class SipManager extends EventEmitter {
     this._transportSocket = null;
   }
 
+  // Common prep shared by register() and makeUnregisteredCall() before
+  // constructing the replacement UA: stop whatever UA is current (if any)
+  // and force-release its transport's OS socket, then track the new one.
+  _beginUaReplacement(socket) {
+    if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
+    this._releasePreviousTransport();
+    this._transportSocket = socket;
+  }
+
+  // 'disconnected'/'newRTCSession' wiring is identical between register()'s
+  // UA and the anonymous-call UA — both need the same stale-UA guard
+  // (isCurrent) documented on register()'s isCurrent() above.
+  _wireCommonUaEvents(ua, isCurrent) {
+    ua.on('disconnected', (e) => { if (isCurrent()) this._log('warn', `Transport disconnected: ${e?.cause || ''}`); });
+    ua.on('newRTCSession', (data) => { if (isCurrent()) this._handleNewSession(data.session); });
+  }
+
   _buildTransportSocket(config, username) {
     if (config.transport === 'UDP-RAW') {
       const port      = config.port || 5060;
@@ -811,12 +783,10 @@ class SipManager extends EventEmitter {
   // ── Registration ─────────────────────────────────────────────────────────
   register(config) {
     return new Promise((resolve, reject) => {
-      if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
-      this._releasePreviousTransport();
       this.config = config;
       const { server, username, password, displayName } = config;
       const { socket, sipProto, connectLabel, contactUri } = this._buildTransportSocket(config, username);
-      this._transportSocket = socket;
+      this._beginUaReplacement(socket);
       this._log('info', `Connecting to ${connectLabel}`);
       const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${username}@${server}`,
@@ -872,8 +842,7 @@ class SipManager extends EventEmitter {
         // a direct callback instead. See _hookTransportCapture().
         this._hookTransportCapture();
       });
-      ua.on('disconnected', (e) => { if (isCurrent()) this._log('warn', `Transport disconnected: ${e?.cause || ''}`); });
-      ua.on('newRTCSession', (data) => { if (isCurrent()) this._handleNewSession(data.session); });
+      this._wireCommonUaEvents(ua, isCurrent);
 
       this.ua.start();
       setTimeout(() => { if (!this.registered) reject(new Error('Registration timeout after 30s')); }, 30000);
@@ -1031,9 +1000,7 @@ class SipManager extends EventEmitter {
       const { socket, sipProto, connectLabel, contactUri } = this._buildTransportSocket(anonConfig, localUser);
       const targetUri = `${sipProto}:${stripped}`;
 
-      if (this.ua) { this._log('info', 'Stopping existing UA'); this.ua.stop(); this.ua = null; }
-      this._releasePreviousTransport();
-      this._transportSocket = socket;
+      this._beginUaReplacement(socket);
       this._log('info', `Unregistered call — connecting to ${connectLabel}`);
       const uaOptions = {
         sockets: [socket], uri: `${sipProto}:${localUser}@${domain}`,
@@ -1065,8 +1032,7 @@ class SipManager extends EventEmitter {
           reject(err);
         });
       });
-      ua.on('disconnected', (e) => { if (isCurrent()) this._log('warn', `Transport disconnected: ${e?.cause || ''}`); });
-      ua.on('newRTCSession', (data) => { if (isCurrent()) this._handleNewSession(data.session); });
+      this._wireCommonUaEvents(ua, isCurrent);
 
       this.ua.start();
       setTimeout(() => {
@@ -1340,25 +1306,32 @@ class SipManager extends EventEmitter {
     this.rtpBridge.start();
   }
 
+  // Closes an on-demand-recording writer (audioWriter/txWriter), logs the
+  // outcome, and returns the public /captures/<file> path — null if there's
+  // no writer, close failed, or (when skipIfEmpty) nothing was actually
+  // written (the tx writer is empty whenever no WAV was played into the call).
+  _closeWriter(writer, label, { skipIfEmpty = false } = {}) {
+    if (!writer) return null;
+    try {
+      const info = writer.close();
+      if (skipIfEmpty && info.size === 0) return null;
+      this._log('info', `${label} recording saved: ${writer.filename} (~${info.duration}s)`);
+      return `/captures/${writer.filename}`;
+    } catch (e) {
+      this._log('warn', `${label} recording save error: ${e.message}`);
+      return null;
+    }
+  }
+
   _teardown() {
     if (this.rtpBridge) {
       // Close on-demand recording writers if still active
       if (this.rtpBridge.recording) {
-        if (this.rtpBridge.audioWriter) {
-          try {
-            const info = this.rtpBridge.audioWriter.close();
-            this._log('info', `RX recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
-          } catch (e) { this._log('warn', `RX recording close error: ${e.message}`); }
-          this.rtpBridge.audioWriter = null;
-        }
-        if (this.rtpBridge.txWriter) {
-          try {
-            const info = this.rtpBridge.txWriter.close();
-            if (info.size > 0) this._log('info', `TX recording saved: ${this.rtpBridge.txWriter.filename} (~${info.duration}s)`);
-          } catch (e) { this._log('warn', `TX recording close error: ${e.message}`); }
-          this.rtpBridge.txWriter = null;
-        }
-        this.rtpBridge.recording = false;
+        this._closeWriter(this.rtpBridge.audioWriter, 'RX');
+        this._closeWriter(this.rtpBridge.txWriter, 'TX', { skipIfEmpty: true });
+        this.rtpBridge.audioWriter = null;
+        this.rtpBridge.txWriter    = null;
+        this.rtpBridge.recording   = false;
       }
       const stats = this.rtpBridge.getStats();
       this._log('info', `Call stats — codec:${stats.codec} rx:${stats.rxPackets}pkts tx:${stats.txPackets}pkts lost:${stats.lostPackets} jitter:${stats.jitterMs}ms`);
@@ -1414,13 +1387,17 @@ class SipManager extends EventEmitter {
     });
   }
 
+  // A bare extension/address becomes a full sip: URI against the currently
+  // registered server; anything already prefixed sip:/sips: passes through.
+  _normalizeUri(target) {
+    if (target.startsWith('sip:') || target.startsWith('sips:')) return target;
+    return target.includes('@') ? `sip:${target}` : `sip:${target}@${this.config.server}`;
+  }
+
   // ── Outbound call ─────────────────────────────────────────────────────────
   makeCall(target, callId) {
     if (!this.ua || !this.registered) return Promise.reject(new Error('Not registered'));
-    let targetUri = target;
-    if (!target.startsWith('sip:') && !target.startsWith('sips:'))
-      targetUri = target.includes('@') ? `sip:${target}` : `sip:${target}@${this.config.server}`;
-    return this._dialOut(targetUri, callId);
+    return this._dialOut(this._normalizeUri(target), callId);
   }
 
   // Places the INVITE on the current UA and records call bookkeeping.
@@ -1533,8 +1510,6 @@ class SipManager extends EventEmitter {
     return new Promise((resolve, reject) => {
       if (!this.rtpBridge)          return reject(new Error('No active call'));
       if (this.rtpBridge.recording) return reject(new Error('Already recording'));
-      const path = require('path');
-      const { AudioWriter } = require('./audioDecoder');
       const id      = this.activeCall?.callId || 'manual';
       const ts      = Date.now();
       const rxPath  = path.join(__dirname, '../captures', `rec_${id.slice(0,8)}_${ts}_rx.wav`);
@@ -1553,27 +1528,10 @@ class SipManager extends EventEmitter {
       if (!this.rtpBridge)           return reject(new Error('No active call'));
       if (!this.rtpBridge.recording) return reject(new Error('Not recording'));
       this.rtpBridge.stopRecording();
-      const path = require('path');
-      let audioFile = null;
-      let txFile    = null;
-      if (this.rtpBridge.audioWriter) {
-        try {
-          const info = this.rtpBridge.audioWriter.close();
-          audioFile  = `/captures/${this.rtpBridge.audioWriter.filename}`;
-          this._log('info', `RX recording saved: ${this.rtpBridge.audioWriter.filename} (~${info.duration}s)`);
-        } catch (e) { this._log('warn', `RX recording save error: ${e.message}`); }
-        this.rtpBridge.audioWriter = null;
-      }
-      if (this.rtpBridge.txWriter) {
-        try {
-          const info = this.rtpBridge.txWriter.close();
-          if (info.size > 0) {
-            txFile = `/captures/${this.rtpBridge.txWriter.filename}`;
-            this._log('info', `TX recording saved: ${this.rtpBridge.txWriter.filename} (~${info.duration}s)`);
-          }
-        } catch (e) { this._log('warn', `TX recording save error: ${e.message}`); }
-        this.rtpBridge.txWriter = null;
-      }
+      const audioFile = this._closeWriter(this.rtpBridge.audioWriter, 'RX');
+      const txFile    = this._closeWriter(this.rtpBridge.txWriter, 'TX', { skipIfEmpty: true });
+      this.rtpBridge.audioWriter = null;
+      this.rtpBridge.txWriter    = null;
       this.emit('recordingStopped', { callId: this.activeCall?.callId, audioFile, txFile });
       resolve({ recording: false, audioFile, txFile });
     });
@@ -1722,7 +1680,7 @@ class SipManager extends EventEmitter {
   _sendRawReInvite(hold) {
     const localIp = this.activeCall?.localIp || getLocalIp();
     const rtpPort = this.activeCall?.localRtpPort || 0;
-    const sdp     = hold ? buildSdpHold(localIp, rtpPort) : buildSdp(localIp, rtpPort);
+    const sdp     = buildSdp(localIp, rtpPort, { hold });
 
     const dialog = this.session?._dialog;
     if (!dialog) throw new Error('No SIP dialog');
@@ -1769,9 +1727,7 @@ class SipManager extends EventEmitter {
   blindTransfer(target) {
     return new Promise((resolve, reject) => {
       if (!this.session || !this.session.isEstablished()) return reject(new Error('No active call'));
-      let targetUri = target;
-      if (!target.startsWith('sip:') && !target.startsWith('sips:'))
-        targetUri = target.includes('@') ? `sip:${target}` : `sip:${target}@${this.config.server}`;
+      const targetUri = this._normalizeUri(target);
       this._log('info', `Blind transfer -> ${targetUri}`);
       try {
         this.session.refer(targetUri);
@@ -1788,9 +1744,7 @@ class SipManager extends EventEmitter {
   attendedTransfer(target) {
     return new Promise((resolve, reject) => {
       if (!this.session || !this.session.isEstablished()) return reject(new Error('No active call'));
-      let targetUri = target;
-      if (!target.startsWith('sip:') && !target.startsWith('sips:'))
-        targetUri = target.includes('@') ? `sip:${target}` : `sip:${target}@${this.config.server}`;
+      const targetUri = this._normalizeUri(target);
 
       this._log('info', `Attended transfer: calling ${targetUri}`);
 
@@ -1838,9 +1792,7 @@ class SipManager extends EventEmitter {
       if (!this.session || !this.session.isEstablished()) return reject(new Error('No active call'));
       if (this.confSession) return reject(new Error('Conference already active'));
 
-      let targetUri = target;
-      if (!target.startsWith('sip:') && !target.startsWith('sips:'))
-        targetUri = target.includes('@') ? `sip:${target}` : `sip:${target}@${this.config.server}`;
+      const targetUri = this._normalizeUri(target);
 
       this._log('info', `Conferencing in: ${targetUri}`);
 
