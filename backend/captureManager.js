@@ -227,6 +227,30 @@ class CaptureManager extends EventEmitter {
       })
       .sort((a, b) => new Date(b.created) - new Date(a.created));
   }
+
+  // All filenames currently in CAPTURE_DIR — for callers doing several
+  // by-callId lookups against the same directory snapshot (e.g. enriching a
+  // full history list) without re-reading the directory once per entry.
+  listAllFiles() {
+    return fs.readdirSync(CAPTURE_DIR);
+  }
+
+  // Find the pcap/recording/transcript files for an 8-char callId prefix
+  // within an already-listed directory snapshot (see listAllFiles()).
+  matchFilesForId(allFiles, id) {
+    if (!id) return { pcap: null, audio: null, transcript: null };
+    return {
+      pcap:       allFiles.find(f => f.includes(id) && (f.endsWith('.pcap') || f.endsWith('.pcapng'))) || null,
+      audio:      allFiles.find(f => f.startsWith(`rec_${id}`) && f.endsWith('.wav'))  || null,
+      transcript: allFiles.find(f => f.startsWith(`rec_${id}`) && f.endsWith('.json')) || null,
+    };
+  }
+
+  // Convenience single-lookup form of matchFilesForId() — does its own
+  // directory read.
+  findFilesForCallId(id) {
+    return this.matchFilesForId(this.listAllFiles(), id);
+  }
 }
 
 module.exports = new CaptureManager();

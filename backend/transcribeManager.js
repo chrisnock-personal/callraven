@@ -71,33 +71,39 @@ function startTranscription(rxFilename, txFilename) {
 }
 
 async function _runTranscription(rxPath, txPath, transcriptPath, rxFilename) {
-  // Resample inbound (remote) to 16kHz mono
-  const rxTmp  = rxPath.replace(/\.wav$/i, '_16k.wav');
-  await _ffmpegResample(rxPath, rxTmp);
+  // rx (required) and tx (optional) are independent files/channels — run
+  // them concurrently rather than back-to-back, same pattern already used
+  // by liveTranscribe.js's per-window flush.
+  const rxPromise = (async () => {
+    const rxTmp = rxPath.replace(/\.wav$/i, '_16k.wav');
+    const rxSrt = rxTmp.replace(/\.wav$/i, '.srt');
+    await _ffmpegResample(rxPath, rxTmp);
+    await _runWhisper(rxTmp, rxSrt);
+    const segs = parseSrt(fs.existsSync(rxSrt) ? fs.readFileSync(rxSrt, 'utf8') : '')
+      .map(s => ({ ...s, speaker: 'Remote' }));
+    [rxTmp, rxSrt].forEach(f => { try { fs.unlinkSync(f); } catch(_) {} });
+    return segs;
+  })();
 
-  // Run whisper on inbound
-  const rxSrt  = rxTmp.replace(/\.wav$/i, '.srt');
-  await _runWhisper(rxTmp, rxSrt);
-  const rxSegs = parseSrt(fs.existsSync(rxSrt) ? fs.readFileSync(rxSrt, 'utf8') : '')
-    .map(s => ({ ...s, speaker: 'Remote' }));
-  [rxTmp, rxSrt].forEach(f => { try { fs.unlinkSync(f); } catch(_) {} });
-
-  // Optionally run whisper on outbound (local WAV playback)
-  let txSegs = [];
-  if (txPath) {
+  const txPromise = (async () => {
+    if (!txPath) return [];
     const txTmp = txPath.replace(/\.wav$/i, '_16k.wav');
     try {
       await _ffmpegResample(txPath, txTmp);
       const txSrt = txTmp.replace(/\.wav$/i, '.srt');
       await _runWhisper(txTmp, txSrt);
-      txSegs = parseSrt(fs.existsSync(txSrt) ? fs.readFileSync(txSrt, 'utf8') : '')
+      const segs = parseSrt(fs.existsSync(txSrt) ? fs.readFileSync(txSrt, 'utf8') : '')
         .map(s => ({ ...s, speaker: 'Local' }));
       [txTmp, txSrt].forEach(f => { try { fs.unlinkSync(f); } catch(_) {} });
+      return segs;
     } catch (e) {
       console.warn(`[TRANSCRIBE] TX whisper failed (non-fatal): ${e.message}`);
       try { fs.unlinkSync(txTmp); } catch(_) {}
+      return [];
     }
-  }
+  })();
+
+  const [rxSegs, txSegs] = await Promise.all([rxPromise, txPromise]);
 
   // Merge and sort by start time
   const segments = [...rxSegs, ...txSegs].sort((a, b) => a.startSec - b.startSec);

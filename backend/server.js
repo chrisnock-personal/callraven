@@ -419,18 +419,16 @@ app.post('/api/play/stop', async (req, res) => {
 app.get('/api/captures', (req, res) => {
   try {
     const captureDir = path.join(__dirname, '../captures');
-    const allFiles = fs.readdirSync(captureDir);
+    const allFiles   = captureManager.listAllFiles();
 
     // Group pcap and audio files by call ID prefix
     const pcapFiles = allFiles
       .filter(f => f.endsWith('.pcap') || f.endsWith('.pcapng'))
       .map(f => {
-        const stat = fs.statSync(path.join(captureDir, f));
+        const stat  = fs.statSync(path.join(captureDir, f));
         // Find matching on-demand recording (rec_ file with same call ID prefix)
-        const prefix = f.match(/call_[^_]+_([a-f0-9]+)/)?.[1];
-        const audio  = prefix
-          ? allFiles.find(a => a.startsWith(`rec_${prefix}`) && a.endsWith('.wav'))
-          : null;
+        const id    = f.match(/call_[^_]+_([a-f0-9]+)/)?.[1];
+        const audio = id ? captureManager.matchFilesForId(allFiles, id).audio : null;
         return {
           filename:    f,
           url:         `/captures/${f}`,
@@ -473,21 +471,18 @@ app.post('/api/resume', async (req, res) => {
 /** GET /api/history — full call history with capture info joined by callId */
 app.get('/api/history', (req, res) => {
   try {
-    const history = callHistory.getAll();
-    const captureDir = path.join(__dirname, '../captures');
-    const allFiles = fs.readdirSync(captureDir);
+    const history  = callHistory.getAll();
+    const allFiles = captureManager.listAllFiles();
     // Enrich each history entry with capture/audio/transcript availability
     const enriched = history.map(h => {
       const id = h.callId ? h.callId.slice(0, 8) : null;
-      const pcap  = id ? allFiles.find(f => f.includes(id) && (f.endsWith('.pcap') || f.endsWith('.pcapng'))) : null;
-      const audio = id ? allFiles.find(f => f.startsWith('rec_' + id) && f.endsWith('.wav')) : null;
-      const tsc   = id ? allFiles.find(f => f.startsWith('rec_' + id) && f.endsWith('.json')) : null;
+      const { pcap, audio, transcript } = captureManager.matchFilesForId(allFiles, id);
       return {
         ...h,
         captureFile:   pcap  ? `/captures/${pcap}`  : (h.captureFile || null),
         audioFile:     audio || null,
         audioUrl:      audio ? `/captures/${audio}` : null,
-        transcriptFile: tsc  || null,
+        transcriptFile: transcript || null,
       };
     });
     res.json({ history: enriched });
