@@ -6,15 +6,13 @@ const { v4: uuidv4 } = require('uuid');
 const path     = require('path');
 const fs       = require('fs');
 const multer   = require('multer');
-const { execFile } = require('child_process');
-const { promisify } = require('util');
-const execFileAsync = promisify(execFile);
 
 const sipManager        = require('./sipManager');
 const callHistory       = require('./callHistory');
 const captureManager    = require('./captureManager');
 const transcribeManager = require('./transcribeManager');
 const { LiveTranscriber, WINDOW_MS } = require('./liveTranscribe');
+const { runFfmpeg } = require('./ffmpegUtils');
 
 const app    = express();
 const server = http.createServer(app);
@@ -159,7 +157,10 @@ sipManager.on('callEnded', (data) => {
   // For remote hangups (far end sends BYE), stop it here after a small
   // delay so any final SIP messages (remote BYE) have time to be written.
   if (data.callId) {
-    setTimeout(() => captureManager.stopCapture(data.callId), 100);
+    setTimeout(() => {
+      captureManager.stopCapture(data.callId).catch(err =>
+        console.error(`[CAPTURE] stopCapture error: ${err.message}`));
+    }, 100);
   }
 });
 
@@ -289,7 +290,7 @@ app.post('/api/hangup', async (req, res) => {
       // Wait briefly then get the filename for the response
       await new Promise(r => setTimeout(r, 150));
       // If still open (callEnded delay hasn't fired yet), stop it now
-      captureFile = captureManager.stopCapture(callId) ||
+      captureFile = await captureManager.stopCapture(callId) ||
                     path.join(__dirname, '../captures',
                       `call_${new Date().toISOString().replace(/[:.]/g, '-')}_${callId.slice(0,8)}.pcap`);
     }
@@ -370,7 +371,7 @@ app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
   try {
     // ffmpeg converts to raw G.722 at 16kHz mono
     // G.722 in SIP uses RTP clock 8000 but actual audio is 16kHz
-    await execFileAsync('ffmpeg', [
+    await runFfmpeg([
       '-y',           // overwrite output
       '-i', inPath,   // input file
       '-ar', '16000', // resample to 16kHz (G.722 audio rate)

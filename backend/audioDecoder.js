@@ -17,7 +17,7 @@
 
 const fs            = require('fs');
 const path          = require('path');
-const { execSync }  = require('child_process');
+const { runFfmpegSync } = require('./ffmpegUtils');
 
 // ─── μ-law decode table (precomputed for speed) ───────────────────────────────
 const ULAW_TABLE = new Int16Array(256);
@@ -115,10 +115,10 @@ class AudioWriter {
         fs.writeFileSync(rawPath, raw);
         // G.722 → 16kHz PCM → resample to 8kHz to match PCMU
         const tmpPath = rawPath + '.raw';
-        execSync(
-          `ffmpeg -y -f g722 -i "${rawPath}" -ar 8000 -ac 1 -f s16le "${tmpPath}" 2>/dev/null`,
-          { timeout: 30000 }
-        );
+        runFfmpegSync([
+          '-y', '-f', 'g722', '-i', rawPath,
+          '-ar', '8000', '-ac', '1', '-f', 's16le', tmpPath
+        ]);
         g722Pcm = fs.readFileSync(tmpPath);
         try { fs.unlinkSync(rawPath); fs.unlinkSync(tmpPath); } catch(e) {}
         const g722Samples = g722Pcm.length / 2;

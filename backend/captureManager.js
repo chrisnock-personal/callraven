@@ -104,35 +104,52 @@ function buildPcapGlobalHeader() {
 }
 
 // ─── CaptureWriter — one per call ────────────────────────────────────────────
+// Uses a plain WriteStream rather than openSync+writeSync: RTP packets land
+// here every ~16-20ms per active call, and writeSync is a blocking syscall
+// on that path for every one of them. A stream queues writes internally and
+// flushes them in the order given — packet ordering is preserved with or
+// without backpressure — while letting the event loop move on in between.
 class CaptureWriter {
   constructor(filePath) {
-    this.filePath = filePath;
-    this.filename = path.basename(filePath);
-    this.fd       = fs.openSync(filePath, 'w');
-    this.count    = 0;
+    this.filePath     = filePath;
+    this.filename     = path.basename(filePath);
+    this.stream       = fs.createWriteStream(filePath);
+    this.count        = 0;
+    this.bytesWritten = 0;
 
-    // Write global header immediately
-    const hdr = buildPcapGlobalHeader();
-    fs.writeSync(this.fd, hdr);
+    this._write(buildPcapGlobalHeader());
+  }
+
+  _write(buf) {
+    this.stream.write(buf);
+    this.bytesWritten += buf.length;
   }
 
   writePacket(srcIp, srcPort, dstIp, dstPort, payload) {
     try {
       const pkt = buildUdpPacket(srcIp, srcPort, dstIp, dstPort, payload);
       const rec = buildPcapRecordHeader(pkt.length);
-      fs.writeSync(this.fd, rec);
-      fs.writeSync(this.fd, pkt);
+      // One write call, not two — keeps the record header and its packet
+      // data as a single queued chunk instead of two independently-ordered
+      // stream writes (harmless either way given a stream's FIFO ordering,
+      // but one syscall instead of two).
+      this._write(Buffer.concat([rec, pkt]));
       this.count++;
     } catch (e) {
       console.error(`[CAPTURE] writePacket error: ${e.message}`);
     }
   }
 
+  // Resolves once the stream has actually finished flushing to disk — not
+  // just queued — so a caller emitting captureReady/serving the file
+  // immediately after can't observe a truncated pcap.
   close() {
-    try { fs.closeSync(this.fd); } catch (e) {}
-    const stat = fs.statSync(this.filePath);
-    console.log(`[CAPTURE] Saved: ${this.filename} (${this.count} packets, ${stat.size} bytes)`);
-    return stat.size;
+    return new Promise((resolve) => {
+      this.stream.end(() => {
+        console.log(`[CAPTURE] Saved: ${this.filename} (${this.count} packets, ${this.bytesWritten} bytes)`);
+        resolve(this.bytesWritten);
+      });
+    });
   }
 }
 
@@ -191,7 +208,7 @@ class CaptureManager extends EventEmitter {
   /**
    * Stop capture, close file, emit captureReady.
    */
-  stopCapture(callId) {
+  async stopCapture(callId) {
     const writer = this.activeCaptures.get(callId);
     if (!writer) {
       console.warn(`[CAPTURE] No active capture for ${callId}`);
@@ -199,7 +216,7 @@ class CaptureManager extends EventEmitter {
     }
 
     this.activeCaptures.delete(callId);
-    const size = writer.close();
+    const size = await writer.close();
 
     this.emit('captureReady', {
       callId,

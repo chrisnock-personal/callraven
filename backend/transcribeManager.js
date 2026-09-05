@@ -12,11 +12,11 @@
 const { execFile } = require('child_process');
 const path         = require('path');
 const fs           = require('fs');
+const { runFfmpeg } = require('./ffmpegUtils');
 
 const CAPTURES_DIR  = '/captures';
 const WHISPER_BIN   = '/usr/local/bin/whisper-cli';
 const WHISPER_MODEL = '/models/ggml-small.en.bin';
-const FFMPEG_BIN    = 'ffmpeg';
 
 // Track in-progress jobs: filename -> { status, startedAt, error? }
 const jobs = new Map();
@@ -125,16 +125,14 @@ async function _runTranscription(rxPath, txPath, transcriptPath, rxFilename) {
 }
 
 function _ffmpegResample(input, output) {
-  return new Promise((resolve, reject) => {
-    execFile(FFMPEG_BIN, [
-      '-y', '-i', input,
-      '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
-      output
-    ], (err, stdout, stderr) => {
-      if (err) return reject(new Error(`ffmpeg: ${stderr || err.message}`));
-      resolve();
-    });
-  });
+  // Post-call recordings can run long, but ffmpeg resampling runs many
+  // times faster than realtime — 2 minutes is a generous ceiling rather
+  // than the previously-unbounded wait.
+  return runFfmpeg([
+    '-y', '-i', input,
+    '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
+    output
+  ], { timeout: 120000 });
 }
 
 function _runWhisper(input, srtOutput) {

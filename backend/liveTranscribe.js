@@ -17,6 +17,7 @@ const { EventEmitter } = require('events');
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
+const { runFfmpeg } = require('./ffmpegUtils');
 
 const WHISPER_BIN   = '/usr/local/bin/whisper-cli';
 const WHISPER_MODEL = '/models/ggml-small.en.bin';
@@ -63,11 +64,7 @@ function writeWav(filepath, pcm16, sampleRate) {
   fs.writeFileSync(filepath, Buffer.concat([hdr, pcm16]));
 }
 
-function ffmpeg(args) {
-  return new Promise((resolve, reject) =>
-    execFile('ffmpeg', args, { timeout: 15000 },
-      (err, _out, stderr) => err ? reject(new Error(`ffmpeg: ${stderr || err.message}`)) : resolve()));
-}
+const ffmpeg = runFfmpeg;
 
 function runWhisper(wavPath) {
   const outBase = wavPath.replace(/\.wav$/i, '');

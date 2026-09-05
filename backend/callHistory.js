@@ -17,12 +17,35 @@ function load() {
   return [];
 }
 
-function save(entries) {
-  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(entries, null, 2)); }
-  catch (e) { console.error('[HISTORY] Save error:', e.message); }
+let entries = load();
+
+// Async, serialized writes: a call event happens far off the RTP hot path,
+// but blocking the event loop on every addCall/endCall/deleteEntry/clear is
+// still avoidable. A bare fire-and-forget fs.writeFile isn't safe on its
+// own though — two writes issued back-to-back (e.g. addCall immediately
+// followed by endCall for a near-instant call) aren't guaranteed to land in
+// order, so a slower write of stale data could finish after and clobber a
+// faster one with the current state. Track one in-flight write and queue at
+// most one follow-up flush (always reading the latest `entries` at flush
+// time) rather than letting writes race.
+let writeInFlight = false;
+let writePending  = false;
+
+function flush() {
+  writeInFlight = true;
+  writePending  = false;
+  const data = JSON.stringify(entries, null, 2);
+  fs.writeFile(HISTORY_FILE, data, (err) => {
+    writeInFlight = false;
+    if (err) console.error('[HISTORY] Save error:', err.message);
+    if (writePending) flush();
+  });
 }
 
-let entries = load();
+function save() {
+  writePending = true;
+  if (!writeInFlight) flush();
+}
 
 module.exports = {
   addCall({ callId, direction, target, from, to, displayName }) {
@@ -48,7 +71,7 @@ module.exports = {
     };
     entries.unshift(entry);
     if (entries.length > MAX_ENTRIES) entries = entries.slice(0, MAX_ENTRIES);
-    save(entries);
+    save();
     return entry;
   },
 
@@ -70,7 +93,7 @@ module.exports = {
       entry.jitterMs   = stats.jitterMs   || 0;
       entry.packetLoss = stats.lossPercent !== undefined ? stats.lossPercent : null;
     }
-    save(entries);
+    save();
     return entry;
   },
 
@@ -84,11 +107,11 @@ module.exports = {
 
   deleteEntry(callId) {
     entries = entries.filter(e => e.callId !== callId);
-    save(entries);
+    save();
   },
 
   getAll()  { return entries; },
-  clear()   { entries = []; save(entries); },
+  clear()   { entries = []; save(); },
 
   toCsv() {
     const header = 'Call ID,Direction,Target,From,To,Display Name,Start Time,End Time,Duration (s),Status,Codec,RX Pkts,TX Pkts,Jitter (ms),Loss (%),Capture File';
