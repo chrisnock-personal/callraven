@@ -1683,6 +1683,7 @@ class SipManager extends EventEmitter {
     if (!transport || !transport.socket) throw new Error('No transport');
 
     const routeSet = (dialog.route_set || []).map(r => `Route: ${r}`).filter(Boolean);
+    const { cseq } = this._dialogFields(dialog, 1);
     const msg = this._buildSipMessage('INVITE', dialog, {
       cseqOffset: 1,
       extraHeaders: [
@@ -1697,7 +1698,18 @@ class SipManager extends EventEmitter {
     // (WebSocketInterface or UdpSocketInterface) — its send() return value
     // tells us whether the transport is actually open, for both alike.
     if (!transport.socket.send(msg)) throw new Error('Transport not open');
-    this._log('info', `Sent raw re-INVITE (hold=${hold}, cseq=${this._dialogFields(dialog, 1).cseq})`);
+
+    // Write the CSeq we just used back onto the dialog. JsSIP's own
+    // Dialog._createRequest() (used by session.terminate() for the real
+    // BYE, session.refer(), etc.) computes its next CSeq as
+    // `dialog.local_seqnum += 1` — since this raw re-INVITE bypasses that
+    // entirely, JsSIP has no idea a CSeq was just consumed. Without this,
+    // the next JsSIP-issued request recomputes the exact same number this
+    // re-INVITE already used, and the far end/PBX can silently drop it as
+    // a duplicate/out-of-order transaction (e.g. a BYE right after a
+    // hold/resume never reaching the other side).
+    dialog.local_seqnum = cseq;
+    this._log('info', `Sent raw re-INVITE (hold=${hold}, cseq=${cseq})`);
   }
 
 
