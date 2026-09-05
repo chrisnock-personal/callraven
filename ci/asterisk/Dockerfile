@@ -16,8 +16,12 @@ RUN apt-get update && \
 COPY pjsip.conf /etc/asterisk/pjsip.conf
 COPY extensions.conf /etc/asterisk/extensions.conf
 COPY rtp.conf /etc/asterisk/rtp.conf
+COPY http.conf /etc/asterisk/http.conf
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 5060/udp
+EXPOSE 8088/tcp
 EXPOSE 19500-19999/udp
 
-CMD ["asterisk", "-f"]
+CMD ["/entrypoint.sh"]
