@@ -1,13 +1,15 @@
 /**
  * audioDecoder.js
- * Decodes G.722, PCMU, PCMA RTP payloads to 16-bit PCM and writes WAV files.
+ * Decodes G.722, PCMU, PCMA, and Opus RTP payloads to 16-bit PCM and writes
+ * WAV files.
  *
- * Uses ffmpeg to decode each codec correctly — called once per payload type
- * change, or we normalise everything to 8kHz PCM on the fly using lookup tables
- * so there's no subprocess overhead per packet.
+ * G.722 is decoded via ffmpeg (a custom ADPCM decoder had accuracy issues);
+ * PCMU/PCMA decode inline via lookup tables; Opus decodes synchronously via
+ * @evan/opus (see opusCodec.js) — no subprocess for any of the latter three.
  *
  * Recording strategy:
  *   - All payloads are decoded to 16-bit signed PCM at 8kHz immediately
+ *     (Opus decodes at 16kHz and is downsampled to match)
  *   - Written sequentially to a WAV file
  *   - G.722 payloads are decoded via ffmpeg in batch at close() time
  *     to avoid the broken custom decoder
@@ -18,6 +20,7 @@
 const fs            = require('fs');
 const path          = require('path');
 const { runFfmpegSync } = require('./ffmpegUtils');
+const opusCodec     = require('./opusCodec');
 
 // ─── μ-law decode table (precomputed for speed) ───────────────────────────────
 const ULAW_TABLE = new Int16Array(256);
@@ -62,6 +65,9 @@ class AudioWriter {
     this.g722Chunks   = [];
     this.g722Bytes    = 0;
 
+    // Opus decoder, created lazily on first Opus payload (see write())
+    this._opusDecoder = null;
+
     // Track whether we have any real audio
     this.hasAudio     = false;
   }
@@ -93,6 +99,21 @@ class AudioWriter {
       }
       this.pcmChunks.push(pcm);
       this.totalSamples += payload.length;
+
+    } else if (payloadType === opusCodec.OPUS_PT) {
+      // Opus decodes synchronously (no ffmpeg subprocess needed, unlike
+      // G.722 above) at 16kHz — downsample to this writer's 8kHz via a
+      // simple decimate-by-2, matching this file's existing lightweight-DSP
+      // style rather than pulling in a resampling filter for one codec.
+      if (!this._opusDecoder) this._opusDecoder = opusCodec.createDecoder();
+      const decoded16k = Buffer.from(this._opusDecoder.decode(payload));
+      const samples16k = decoded16k.length / 2;
+      const pcm = Buffer.alloc(Math.floor(samples16k / 2) * 2);
+      for (let i = 0; i < pcm.length / 2; i++) {
+        pcm.writeInt16LE(decoded16k.readInt16LE(i * 4), i * 2);
+      }
+      this.pcmChunks.push(pcm);
+      this.totalSamples += pcm.length / 2;
     }
     // Other PTs silently ignored
   }

@@ -10,6 +10,7 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@evan/opus": "^1.0.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "jssip": "^3.10.0",

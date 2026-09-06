@@ -116,6 +116,14 @@ jobs:
             --sip-server 127.0.0.1 \
             --sip-port 5060
 
+      - name: Run Opus call test
+        run: |
+          python3 ci/opus_call_test.py \
+            --ep1-url http://localhost:3000 \
+            --ep2-url http://localhost:3001 \
+            --sip-server 127.0.0.1 \
+            --sip-port 5060
+
       - name: Run SRTP call test
         run: |
           python3 ci/srtp_call_test.py \

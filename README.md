@@ -168,7 +168,7 @@ python3 "Sample Scripts/sip_call_p2p_test.py"
 python3 "Sample Scripts/sip_call_ivr_test.py"
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus a Docker build, boot smoke test, a P2P call test, and an SRTP call test (dedicated `media_encryption=sdes` endpoints, verifying real decrypted RTP flows with zero loss) against a throwaway Asterisk container.
+CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus a Docker build, boot smoke test, a P2P call test, an Opus call test (confirms Opus is actually negotiated and real RTP flows with zero loss), and an SRTP call test (dedicated `media_encryption=sdes` endpoints, verifying real decrypted RTP flows with zero loss) against a throwaway Asterisk container.
 
 ---
 
@@ -293,17 +293,17 @@ POST /api/call/anonymous
 
 ### WAV Playback
 
-WAV files are converted to raw G.722 at upload time using ffmpeg. During playback, G.722 frames are injected directly into the RTP stream, synchronised to the existing stream's SSRC and sequence number to avoid jitter buffer issues at the far end. Incoming RTP is suppressed during playback.
+WAV files are converted to both raw G.722 and a framed Opus file at upload time (see Supported Codecs below). During playback, frames of whichever codec the active call actually negotiated are injected directly into the RTP stream, synchronised to the existing stream's SSRC and sequence number to avoid jitter buffer issues at the far end. Incoming RTP is suppressed during playback.
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
 | `GET` | `/api/wavfiles` | — | List uploaded files |
-| `POST` | `/api/wavfiles/upload` | `multipart/form-data` field `file` | Upload and convert WAV to G.722 |
-| `DELETE` | `/api/wavfiles/:filename` | — | Delete a file |
-| `POST` | `/api/play` | `{filename}` | Play a file into the active call |
+| `POST` | `/api/wavfiles/upload` | `multipart/form-data` field `file` | Upload and convert WAV to G.722 and Opus |
+| `DELETE` | `/api/wavfiles/:filename` | — | Delete a file (and its Opus sibling) |
+| `POST` | `/api/play` | `{filename}` | Play a file into the active call (using whichever codec variant matches what was negotiated) |
 | `POST` | `/api/play/stop` | — | Stop playback |
 
-**WAV format note:** Any WAV format is accepted. ffmpeg converts to 16kHz mono G.722 automatically. For best quality, source files should be 16kHz mono:
+**WAV format note:** Any WAV format is accepted. ffmpeg converts to 16kHz mono automatically. For best quality, source files should be 16kHz mono:
 ```bash
 ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav
 ```
@@ -588,12 +588,13 @@ curl -O $BASE/api/transcripts/rec_<callid>_<ts>_rx.wav/text
 
 | Codec | RTP PT | Direction | Notes |
 |---|---|---|---|
-| G.722 | 9 | Send + Receive | Preferred. 16kHz wideband ADPCM. WAV files converted to G.722 at upload. |
+| Opus | 111 (dynamic) | Send + Receive | **Preferred.** 16kHz internally (RTP clock is always 48000 per RFC 7587, independent of that), 20ms frames, `useinbandfec=1`. Encode/decode via [`@evan/opus`](https://github.com/evanwashere/opus) (see `backend/opusCodec.js`) — ffmpeg links libopus but only exposes it through the Ogg container, not the raw per-packet stream RTP needs. WAV files are converted to a length-prefixed Opus frame file (`.opusraw`) at upload time alongside the existing G.722 conversion; playback picks whichever matches the active call's negotiated codec. A SIP proxy/B2BUA in the path (confirmed: this project's own CI Asterisk) may assign a *different* dynamic PT per leg than either endpoint originally offered — the receive path reads each call's actual PT-to-codec mapping from that call's own SDP rather than assuming a fixed number, so this is handled transparently. |
+| G.722 | 9 | Send + Receive | 16kHz wideband ADPCM. Fallback if the far end doesn't support Opus. WAV files also converted to G.722 at upload. |
 | PCMU (G.711 μ-law) | 0 | Send + Receive | 8kHz narrowband. Fallback. |
 | PCMA (G.711 A-law) | 8 | Send + Receive | 8kHz narrowband. Fallback. |
 | telephone-event | 101 | Send: SIP INFO. Receive: RTP (RFC 4733) | `/api/dtmf` sends DTMF via SIP INFO (JsSIP's default), not as an RTP event — see the Calls section below. Inbound digits the far end presses **are** detected from the RTP stream (`dtmfReceived` WebSocket event, see Event Reference). A digit is normally reported the moment its RFC 4733 end packet arrives; if the far end never sends one, it's still reported after ~1.5s of continuous mid-event packets rather than silently dropped — confirmed necessary against a real Asterisk 20.6.0, whose SIP-INFO-to-RFC4733 DTMF relay does not reliably set the end bit and can occasionally emit more than one event for what was a single keypress. |
 
-SDP advertises G.722 as the preferred codec. If the PBX does not support G.722, it falls back to PCMU or PCMA automatically.
+SDP advertises Opus as the preferred codec, then G.722, then PCMU/PCMA. If the PBX/peer doesn't support Opus, it falls back through the rest automatically.
 
 ---
 

@@ -63,6 +63,8 @@ const { AudioWriter } = require('./audioDecoder');
 const { NoiseSuppressor } = require('./noiseSuppressor');
 const srtp = require('./srtp');
 const { DtmfEventTracker } = require('./dtmfEvent');
+const opusCodec = require('./opusCodec');
+const { OPUS_PT, OPUS_SAMPLE_RATE, OPUS_TS_INCREMENT } = opusCodec;
 
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
@@ -101,10 +103,16 @@ function getLocalIp() {
   return '127.0.0.1';
 }
 
+// Shared PT → display-name map, used both for the codec detected from
+// actually-received packets (RtpBridge.start()) and the codec seeded from
+// the remote SDP answer before any packet has arrived (parseRemoteSdp()).
+const PT_CODEC_MAP = { 0: 'PCMU/8kHz', 8: 'PCMA/8kHz', 9: 'G722/16kHz', 18: 'G729/8kHz', [OPUS_PT]: 'Opus/16kHz' };
+
 // ─── SDP ─────────────────────────────────────────────────────────────────────
-// Codec preference order: G.722 (PT9) > PCMU (PT0) > PCMA (PT8)
+// Codec preference order: Opus (PT111) > G.722 (PT9) > PCMU (PT0) > PCMA (PT8)
 // G.722 is 16kHz wideband — RTP clock is 8000 per RFC 3551 (a historical quirk)
-// but actual audio is 16kHz ADPCM.
+// but actual audio is 16kHz ADPCM. Opus's RTP clock is always 48000
+// regardless of its actual (16kHz here) DSP rate — see opusCodec.js.
 // `hold: true` sends sendonly (tells the remote to stop sending RTP) instead
 // of the normal sendrecv.
 // `srtp: {key, salt}` offers SDES-SRTP exclusively for this leg (RTP/SAVP +
@@ -118,7 +126,12 @@ function buildSdp(localIp, rtpPort, { hold = false, srtp: localSrtp = null } = {
     's=CallRaven Call',
     `c=IN IP4 ${localIp}`,
     't=0 0',
-    `m=audio ${rtpPort} ${proto} 9 0 8 101`,
+    `m=audio ${rtpPort} ${proto} ${OPUS_PT} 9 0 8 101`,
+    // RFC 7587: the rtpmap channel count is fixed at 2 for historical
+    // reasons regardless of actual channel count; fmtp pins this app down
+    // to mono. useinbandfec=1 matches opusCodec.js's encoder configuration.
+    `a=rtpmap:${OPUS_PT} opus/48000/2`,
+    `a=fmtp:${OPUS_PT} useinbandfec=1;stereo=0;sprop-stereo=0`,
     'a=rtpmap:9 G722/8000',
     'a=rtpmap:0 PCMU/8000',
     'a=rtpmap:8 PCMA/8000',
@@ -130,19 +143,46 @@ function buildSdp(localIp, rtpPort, { hold = false, srtp: localSrtp = null } = {
   return lines.join('\r\n');
 }
 
+// Matches an a=rtpmap codec name (case-insensitively) to this app's
+// PT_CODEC_MAP display names. G.722/PCMU/PCMA/telephone-event have
+// IANA-fixed static payload types (RFC 3551) essentially never renumbered
+// in practice, but Opus has no static assignment — it's always a dynamic
+// PT (registered 96-127), and a B2BUA/proxy in the path (confirmed: this
+// project's own CI Asterisk) is free to assign a *different* dynamic PT
+// number per leg than what either endpoint originally offered. So the
+// wire PT that means "Opus" must be read from each SDP's own rtpmap, not
+// assumed to be a fixed constant, or packets renumbered in transit are
+// silently unrecognized as any known codec.
+const RTPMAP_NAME_TO_CODEC = { g722: 'G722/16kHz', pcmu: 'PCMU/8kHz', pcma: 'PCMA/8kHz', opus: 'Opus/16kHz' };
+
 function parseRemoteSdp(sdp) {
   if (!sdp) return null;
   const lines = sdp.split(/\r?\n/);
-  let ip = null, port = null, secure = false;
+  let ip = null, port = null, secure = false, firstPt = null;
+  const ptCodecMap = {}; // built from this specific SDP's own rtpmap lines
   for (const line of lines) {
     const c = line.match(/^c=IN IP4 (.+)/);
     if (c) ip = c[1].trim();
-    const m = line.match(/^m=audio (\d+) (\S+)/);
-    if (m) { port = parseInt(m[1]); secure = m[2] === 'RTP/SAVP'; }
+    const m = line.match(/^m=audio (\d+) (\S+) (\d+)/);
+    if (m) { port = parseInt(m[1]); secure = m[2] === 'RTP/SAVP'; firstPt = parseInt(m[3]); }
+    const r = line.match(/^a=rtpmap:(\d+) (\w+)\//i);
+    if (r) {
+      const codec = RTPMAP_NAME_TO_CODEC[r[2].toLowerCase()];
+      if (codec) ptCodecMap[parseInt(r[1])] = codec;
+    }
   }
   if (!ip || !port) return null;
   const remoteCrypto = secure ? srtp.parseCryptoAttr(sdp) : null;
-  return { ip, port, remoteCrypto };
+  // First PT listed is the far end's preferred choice from the negotiated
+  // set — used to seed RtpBridge.stats.codec before any packet has
+  // actually arrived (see RtpBridge constructor and SipManager.playWav),
+  // since e.g. an IVR-style greeting can play before the caller has sent
+  // any audio of their own to detect from.
+  const negotiatedCodec = ptCodecMap[firstPt] || null;
+  // The PT this specific peer uses for Opus, if any — see RTPMAP_NAME_TO_CODEC
+  // comment above for why this can't just be the OPUS_PT constant.
+  const remoteOpusPt = Object.keys(ptCodecMap).map(Number).find(pt => ptCodecMap[pt] === 'Opus/16kHz') ?? null;
+  return { ip, port, remoteCrypto, negotiatedCodec, remoteOpusPt };
 }
 
 // Minimal SIP response parse: status code + top Via branch, used to
@@ -278,12 +318,23 @@ function convertToUlaw8k(raw, fmt) {
 
 // ─── RTP bridge ──────────────────────────────────────────────────────────────
 class RtpBridge {
-  constructor(localPort, remoteIp, remotePort, callId, nsEnabled = true, srtpOpts = null) {
+  constructor(localPort, remoteIp, remotePort, callId, nsEnabled = true, srtpOpts = null, negotiatedCodec = null, remoteOpusPt = null) {
     this.localPort   = localPort;
     this.remoteIp    = remoteIp;
     this.remotePort  = remotePort;
     this.callId      = callId;
     this.localIp     = getLocalIp();
+    // Seeded from the remote SDP answer's first-listed codec (see
+    // parseRemoteSdp) so SipManager.playWav can pick the right pre-converted
+    // file even before any packet has actually arrived to auto-detect from
+    // (stats.codec below stays the source of truth once real traffic
+    // starts — this is only a fallback for the gap before that).
+    this._negotiatedCodec = negotiatedCodec;
+    // The wire PT this specific peer uses for Opus (may differ from
+    // OPUS_PT — see parseRemoteSdp's RTPMAP_NAME_TO_CODEC comment). Used
+    // in start()'s receive handler to normalize incoming packets to
+    // OPUS_PT before any codec-specific dispatch runs.
+    this._remoteOpusPt = remoteOpusPt;
     // SDES-SRTP contexts, one per direction — both present or both absent
     // (negotiation happened before this bridge was constructed; see
     // SipManager._startRtp/conference()). Derived once here since key
@@ -378,12 +429,17 @@ class RtpBridge {
         const seq  = msg.readUInt16BE(2);
         const ts   = msg.readUInt32BE(4);
         const ssrc = msg.readUInt32BE(8);
-        const pt   = msg[1] & 0x7f;
+        // Normalize the wire PT to OPUS_PT if it matches this peer's own
+        // (possibly renumbered) Opus assignment — see parseRemoteSdp's
+        // RTPMAP_NAME_TO_CODEC comment — so every codec-specific branch
+        // below (and onAudio/onRawAudio/recording, further down) can keep
+        // comparing against the fixed OPUS_PT constant.
+        const wirePt = msg[1] & 0x7f;
+        const pt = (this._remoteOpusPt !== null && wirePt === this._remoteOpusPt) ? OPUS_PT : wirePt;
 
         // Codec detection
         if (!this.stats.codec) {
-          const map = { 0: 'PCMU/8kHz', 8: 'PCMA/8kHz', 9: 'G722/16kHz', 18: 'G729/8kHz' };
-          this.stats.codec = map[pt] || `PT${pt}`;
+          this.stats.codec = PT_CODEC_MAP[pt] || `PT${pt}`;
         }
 
         // Packet loss (sequence gap)
@@ -471,12 +527,17 @@ class RtpBridge {
 
   // Send an RTP packet for the given payload type — all counters kept as
   // unsigned 32-bit with >>> 0. RTP timestamp increments by frame size per
-  // RFC 3551 §4.5.2 (applies to both PCMU, pt 0, and G.722, pt 9).
-  _sendRtpPacket(payload, pt) {
+  // RFC 3551 §4.5.2 (applies to both PCMU, pt 0, and G.722, pt 9) — that
+  // default only holds because those codecs' byte-per-frame count happens
+  // to equal their RTP-clock sample count for a 20ms frame. Opus doesn't
+  // share that coincidence (its RTP clock is always 48000 regardless of
+  // payload byte length — see opusCodec.js), so callers for it pass
+  // tsIncrement explicitly.
+  _sendRtpPacket(payload, pt, tsIncrement = payload.length) {
     if (!this.socket) return;
     try {
       this.seq       = (this.seq + 1) & 0xffff;
-      this.timestamp = (this.timestamp + payload.length) >>> 0;
+      this.timestamp = (this.timestamp + tsIncrement) >>> 0;
 
       const header = Buffer.alloc(12);
       header[0] = 0x80;  // V=2, P=0, X=0, CC=0
@@ -504,27 +565,44 @@ class RtpBridge {
     }
   }
 
-  // Play a pre-converted raw G.722 file (produced by ffmpeg at upload time).
-  // G.722 is 64kbps = 8000 bytes/sec. 20ms frame = 160 bytes.
-  // RTP payload type 9, RTP clock 8000 (RFC 3551 quirk despite 16kHz audio).
+  // Play a pre-converted file produced at upload time: raw G.722 (fixed
+  // 160-byte/20ms chunks, PT 9, RTP clock 8000 despite 16kHz audio — RFC
+  // 3551 quirk) or, for a `.opusraw` file, opusCodec's length-prefixed
+  // frame format (variable-length packets, PT 111, RTP clock always 48000
+  // regardless of the 16kHz DSP rate — see opusCodec.js). Both share the
+  // same 20ms pacing loop and _sendRtpPacket call below; only the frame
+  // source, PT, and RTP timestamp increment differ.
   playWav(filePath, onDone) {
     this.stopPlayback();
 
-    // G.722: 64kbps = 8000 bytes/sec → 20ms = 160 bytes per frame
-    const FRAME_BYTES = 160;
-    const FRAME_MS    = 20;
+    const FRAME_MS = 20;
+    const isOpus   = filePath.endsWith('.opusraw');
+    const pt       = isOpus ? OPUS_PT : 9;
 
-    let g722data;
+    let frames;    // array of Buffers to send in order, one per FRAME_MS tick
+    let tsPerFrame; // RTP timestamp increment per frame
     try {
-      g722data = fs.readFileSync(filePath);
-      console.log(`[WAV] Loaded G.722: ${path.basename(filePath)} (${g722data.length} bytes, ~${Math.round(g722data.length/8000)}s)`);
+      if (isOpus) {
+        frames = opusCodec.readFrameFile(fs.readFileSync(filePath));
+        tsPerFrame = OPUS_TS_INCREMENT;
+        console.log(`[WAV] Loaded Opus: ${path.basename(filePath)} (${frames.length} frames, ~${Math.round(frames.length * FRAME_MS / 1000)}s)`);
+      } else {
+        const g722data = fs.readFileSync(filePath);
+        const FRAME_BYTES = 160; // G.722: 64kbps = 8000 bytes/sec → 20ms = 160 bytes
+        frames = [];
+        for (let offset = 0; offset + FRAME_BYTES <= g722data.length; offset += FRAME_BYTES) {
+          frames.push(g722data.subarray(offset, offset + FRAME_BYTES));
+        }
+        tsPerFrame = FRAME_BYTES; // coincides with payload.length for G.722 — see _sendRtpPacket
+        console.log(`[WAV] Loaded G.722: ${path.basename(filePath)} (${g722data.length} bytes, ~${Math.round(g722data.length/8000)}s)`);
+      }
     } catch (e) {
       console.error(`[WAV] Load error: ${e.message}`);
       if (onDone) onDone(e);
       return;
     }
 
-    let offset = 0;
+    let frameIndex = 0;
 
     // Sync seq/ts to the live stream before taking over
     if (this.lastSeq !== null) {
@@ -535,23 +613,21 @@ class RtpBridge {
     this.playing   = true;
 
     this.playTimer = setInterval(() => {
-      if (!this.socket || offset >= g722data.length) {
+      if (!this.socket || frameIndex >= frames.length) {
         this.stopPlayback();
         if (onDone) onDone(null);
         return;
       }
       try {
-        const frame = g722data.slice(offset, offset + FRAME_BYTES);
-        offset += FRAME_BYTES;
-        // Send as PT 9 (G.722) — timestamp increments by 160 per RFC 3551
-        this._sendRtpPacket(frame, 9);
+        const frame = frames[frameIndex++];
+        this._sendRtpPacket(frame, pt, tsPerFrame);
         // Write to outbound (tx) recorder — keeps playback separate from inbound
         if (this.recording && this.txWriter) {
-          this.txWriter.write(9, frame);
+          this.txWriter.write(pt, frame);
         }
         // Raw outbound relay for live diarization
         if (this.onRawOutboundAudio) {
-          this.onRawOutboundAudio(9, frame);
+          this.onRawOutboundAudio(pt, frame);
         }
       } catch (e) {
         console.error(`[WAV] Frame error: ${e.message}`);
@@ -570,17 +646,30 @@ class RtpBridge {
   // Send silence frames after WAV ends to prevent RTP timeout on the far end
   _startSilence() {
     if (this.silenceTimer) return;
-    const codec = this.stats.codec || '';
+    const codec  = this.stats.codec || this._negotiatedCodec || '';
     const isG722 = codec.includes('G722');
+    const isOpus = codec.includes('Opus');
     // G.722 is ADPCM, not a direct log-PCM table like μ-law — 0x00 is NOT
     // silence there (verified: ffmpeg's own G.722 encoder settles on 0xFA
     // for a true-silence input; feeding it 0x00 instead decodes back out
     // as a sustained near-full-scale signal, confirmed both standalone and
     // following real audio, independent of any Node-side pipe timing).
-    const frame  = isG722 ? Buffer.alloc(160, 0xfa) : Buffer.alloc(160, 0x7f);
+    let frame, pt, tsIncrement;
+    if (isOpus) {
+      // Encode one true-silent 20ms frame (320 zero samples) and reuse it —
+      // same "precompute once, repeat" approach as the other codecs below.
+      if (!this._opusSilenceFrame) {
+        this._opusSilenceFrame = Buffer.from(opusCodec.createEncoder().encode(Buffer.alloc(opusCodec.OPUS_FRAME_BYTES)));
+      }
+      frame = this._opusSilenceFrame; pt = OPUS_PT; tsIncrement = OPUS_TS_INCREMENT;
+    } else if (isG722) {
+      frame = Buffer.alloc(160, 0xfa); pt = 9; tsIncrement = 160;
+    } else {
+      frame = Buffer.alloc(160, 0x7f); pt = 0; tsIncrement = 160;
+    }
     this.silenceTimer = setInterval(() => {
       if (!this.socket || this.playing || this.held) { this._stopSilence(); return; }
-      this._sendRtpPacket(frame, isG722 ? 9 : 0);
+      this._sendRtpPacket(frame, pt, tsIncrement);
     }, 20);
   }
 
@@ -642,6 +731,13 @@ class RtpBridge {
           });
         }
         this._g722dec.write(payload);
+        return;
+      } else if (pt === OPUS_PT) {
+        // Opus decode is synchronous (no subprocess, unlike G.722 above) —
+        // handled inline here rather than falling through to the shared
+        // 8kHz emit below, since Opus decodes at 16kHz.
+        if (!this._opusDecoder) this._opusDecoder = opusCodec.createDecoder();
+        this._emitAudio(OPUS_PT, OPUS_SAMPLE_RATE, Buffer.from(this._opusDecoder.decode(payload)));
         return;
       } else if (pt === 0) {
         // PCMU (μ-law) → 8kHz 16-bit PCM
@@ -1296,7 +1392,7 @@ class SipManager extends EventEmitter {
       this._log('warn', 'Remote answer offered SRTP but we did not request it — ignoring');
     }
     const srtpOpts = (localSrtp && remote.remoteCrypto) ? { localSrtp, remoteSrtp: remote.remoteCrypto } : null;
-    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled, srtpOpts);
+    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled, srtpOpts, remote.negotiatedCodec, remote.remoteOpusPt);
     this.rtpBridge.onDtmf = (digit, info) => {
       this._log('info', `DTMF received: ${digit}`);
       this.emit('dtmfReceived', { callId: this.activeCall?.callId, digit, durationMs: info.durationMs });
@@ -1901,7 +1997,7 @@ class SipManager extends EventEmitter {
                 this._log('warn', 'Conference leg: offered SRTP but remote answer had no compatible crypto');
               }
               const srtpOpts = (localSrtp && remote.remoteCrypto) ? { localSrtp, remoteSrtp: remote.remoteCrypto } : null;
-              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId, this.noiseSuppressionEnabled, srtpOpts);
+              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId, this.noiseSuppressionEnabled, srtpOpts, remote.negotiatedCodec, remote.remoteOpusPt);
               this.confBridge.start();
 
               // Cross-wire: forward packets from leg1 to leg2 and vice versa
@@ -1946,9 +2042,18 @@ class SipManager extends EventEmitter {
   }
 
   // ── Play WAV ──────────────────────────────────────────────────────────────
+  // `filePath` names the canonical (.g722) upload — if the active call
+  // actually negotiated Opus, transparently play its .opusraw sibling
+  // instead (both are produced from the same upload, see
+  // POST /api/wavfiles/upload), falling back to the requested file if that
+  // sibling doesn't exist (e.g. an upload made before Opus support existed).
   playWav(filePath) {
     return new Promise((resolve, reject) => {
       if (!this.rtpBridge) return reject(new Error('No active RTP bridge'));
+      if ((this.rtpBridge.stats.codec || this.rtpBridge._negotiatedCodec || '').includes('Opus')) {
+        const opusPath = filePath.replace(/\.(g722|opusraw)$/i, '') + '.opusraw';
+        if (fs.existsSync(opusPath)) filePath = opusPath;
+      }
       if (!fs.existsSync(filePath)) return reject(new Error(`File not found: ${filePath}`));
       this._log('info', `Playing WAV: ${path.basename(filePath)}`);
       this.rtpBridge.playWav(filePath, (err) => {

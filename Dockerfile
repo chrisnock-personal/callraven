@@ -55,6 +55,12 @@ ENV RTP_PORT_LOW=10000
 ENV RTP_PORT_HIGH=20000
 ENV CAPTURE_INTERFACE=any
 ENV NODE_ENV=production
+# @evan/opus auto-detects a native binary vs its WASM fallback; forcing
+# WASM removes any future dependence on native-binary/musl compatibility on
+# this Alpine base — both were verified correct here, but the perf gap is
+# irrelevant at 20ms/16kHz telephony frame sizes, so there's no reason to
+# risk it silently regressing on a future base-image bump.
+ENV OPUS_FORCE_WASM=1
 
 EXPOSE 3000
 

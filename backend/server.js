@@ -13,6 +13,7 @@ const captureManager    = require('./captureManager');
 const transcribeManager = require('./transcribeManager');
 const { LiveTranscriber, WINDOW_MS } = require('./liveTranscribe');
 const { runFfmpeg } = require('./ffmpegUtils');
+const opusCodec = require('./opusCodec');
 
 const app    = express();
 const server = http.createServer(app);
@@ -365,14 +366,20 @@ app.get('/api/wavfiles', (req, res) => {
   } catch { res.json({ files: [] }); }
 });
 
-/** POST /api/wavfiles/upload — upload and convert WAV to raw G.722 */
+/** POST /api/wavfiles/upload — upload, convert to raw G.722, and (for
+ * Opus calls) also produce a matching .opusraw sibling — see
+ * SipManager.playWav for how the right one gets picked at play time. */
 app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-  const inPath  = req.file.path;
+  const inPath   = req.file.path;
+  const baseName = req.file.filename.replace(/\.wav$/i, '');
   // Output as raw G.722 bitstream — no container, just bytes
-  const outName = req.file.filename.replace(/\.wav$/i, '') + '.g722';
-  const outPath = path.join(WAV_DIR, outName);
+  const outName  = baseName + '.g722';
+  const outPath  = path.join(WAV_DIR, outName);
+  const pcmPath  = path.join(WAV_DIR, baseName + '.pcm16k.tmp');
+  const opusName = baseName + '.opusraw';
+  const opusPath = path.join(WAV_DIR, opusName);
 
   try {
     // ffmpeg converts to raw G.722 at 16kHz mono
@@ -387,9 +394,16 @@ app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
       outPath
     ]);
 
+    // Opus has no raw/bare-stream ffmpeg format (only Ogg Opus, a
+    // container) — so extract plain 16kHz PCM instead (ffmpeg handles that
+    // natively) and encode it to Opus in Node via opusCodec.js.
+    await runFfmpeg(['-y', '-i', inPath, '-ar', '16000', '-ac', '1', '-f', 's16le', pcmPath]);
+    fs.writeFileSync(opusPath, opusCodec.encodePcmToFrameFile(fs.readFileSync(pcmPath)));
+    fs.unlinkSync(pcmPath);
+
     fs.unlinkSync(inPath);
     const stat = fs.statSync(outPath);
-    console.log(`[WAV] Converted to G.722: ${outName} (${stat.size} bytes)`);
+    console.log(`[WAV] Converted to G.722: ${outName} (${stat.size} bytes), Opus: ${opusName} (${fs.statSync(opusPath).size} bytes)`);
     res.json({ success: true, filename: outName, url: `/wavfiles/${outName}` });
   } catch (err) {
     console.error(`[WAV] ffmpeg error: ${err.message}`);
@@ -397,12 +411,17 @@ app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-/** DELETE /api/wavfiles/:filename */
+/** DELETE /api/wavfiles/:filename — also removes the .opusraw sibling
+ * produced alongside it at upload time, if any (see POST .../upload). */
 app.delete('/api/wavfiles/:filename', (req, res) => {
   const filePath = path.join(WAV_DIR, path.basename(req.params.filename));
+  const opusPath = filePath.replace(/\.(g722|wav)$/i, '') + '.opusraw';
   try {
-    if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); res.json({ success: true }); }
-    else res.status(404).json({ error: 'File not found' });
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      try { fs.unlinkSync(opusPath); } catch (e) { /* no sibling to clean up */ }
+      res.json({ success: true });
+    } else res.status(404).json({ error: 'File not found' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
