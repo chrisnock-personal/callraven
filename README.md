@@ -228,7 +228,7 @@ Unregistered calling (below) also supports `UDP-RAW` via the same `transport` fi
 
 ### Raw TCP/TLS SIP Transport (Secure SIP)
 
-Select **"TCP (raw, no WS)"** or **"TLS (raw, no WS)"** as the Transport for SIP over a raw TCP stream, optionally encrypted (SIPS). Implemented in `backend/tcpSipSocket.js`, reusing the exact same JsSIP integration approach as the raw UDP transport — same reused dialogs/digest-auth/hold/transfer/conference/DTMF, no retransmission logic needed this time since TCP/TLS are reliable transports (only UDP needs that).
+Select **"TCP (raw, no WS)"** or **"TLS (raw, no WS)"** as the Transport for SIP over a raw TCP stream, optionally encrypted (SIPS). Implemented in `backend/tcpSipSocket.js`, reusing the exact same JsSIP integration approach as the raw UDP transport — no retransmission logic needed this time since TCP/TLS are reliable transports (only UDP needs that).
 
 The one thing genuinely new here: TCP/TLS are stream-based, so an incoming chunk of bytes doesn't necessarily correspond to one complete SIP message the way a UDP datagram does — a message can be split across multiple reads, or several messages can arrive in a single read. `tcpSipSocket.js` buffers incoming bytes and splits them into complete messages using each message's `Content-Length` header before handing them to JsSIP one at a time.
 
