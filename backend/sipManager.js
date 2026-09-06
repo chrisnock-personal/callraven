@@ -68,6 +68,7 @@ global.WebSocket = WebSocket;
 const JsSIP = require('jssip');
 const UdpSocketInterface = require('./udpSipSocket');
 const TcpSocketInterface = require('./tcpSipSocket');
+const WsSocketInterface  = require('./wsSipSocket');
 
 // ─── RTP port pool ───────────────────────────────────────────────────────────
 const RTP_PORT_LOW  = parseInt(process.env.RTP_PORT_LOW  || '10000');
@@ -777,7 +778,7 @@ class SipManager extends EventEmitter {
     const wsPort   = config.transport === 'TLS' ? (config.wsPort || 8089) : (config.wsPort || 8088);
     const wsPath   = config.wsPath || '/ws';
     const wsUri    = `${wsProto}://${config.server}:${wsPort}${wsPath}`;
-    return { socket: new JsSIP.WebSocketInterface(wsUri), sipProto, connectLabel: wsUri, contactUri: null };
+    return { socket: new WsSocketInterface(wsUri), sipProto, connectLabel: wsUri, contactUri: null };
   }
 
   // ── Registration ─────────────────────────────────────────────────────────
@@ -853,121 +854,22 @@ class SipManager extends EventEmitter {
   // Hooks the raw transport message stream so 100/180/200 responses (which
   // JsSIP doesn't expose on session events for outbound calls) still make it
   // into the pcap. Shared by both the registered UA and ad-hoc unregistered UAs.
+  // All three transports (UdpSocketInterface, TcpSocketInterface and
+  // WsSocketInterface) implement the same onRawMessage contract, so there's
+  // one hook here rather than a per-transport special case.
   _hookTransportCapture() {
     const transportSocket = this.ua?._transport?.socket;
-    if (transportSocket instanceof UdpSocketInterface || transportSocket instanceof TcpSocketInterface) {
-      // We own the receive path directly — no WS-style reflection needed.
-      if (transportSocket._sipCaptureHooked) return;
-      transportSocket._sipCaptureHooked = true;
-      transportSocket.onRawMessage = (text, direction) => {
-        const callId = this._pendingCallId || this.activeCall?.callId;
-        if (!callId) return;
-        const localIp = getLocalIp();
-        const server  = this.config?.server || '';
-        if (direction === 'in') captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, text);
-        else                    captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, text);
-      };
-      return;
-    }
-    this._hookWsTransportCapture();
-  }
-
-  // WS-specific fallback: reflects into WebSocketInterface internals since
-  // JsSIP doesn't expose a first-class raw-message callback for that transport.
-  _hookWsTransportCapture() {
-    setTimeout(() => {
-      try {
-        const transport = this.ua?._transport;
-        const ws = transport?._ws || transport?.ws || transport?._socket;
-        if (!transport || transport._ok200hooked) return;
-
-        const handleSipResponse = (text) => {
-          if (!text || !text.startsWith('SIP/2.0')) return;
-          const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
-          if (firstLine.includes(' 180 ')) return; // captured via progress event
-          const callId = this._pendingCallId || this.activeCall?.callId;
-          if (!callId) return;
-          captureManager.writeSipMessage(callId, this.config?.server || '', 5060, getLocalIp(), 5060, text);
-          this._log('info', `[CAP] Inbound SIP: ${firstLine}`);
-        };
-
-        // Hook transport.ondata — JsSIP calls this for every inbound WS message
-        if (typeof transport.ondata === 'function') {
-          const origOnData = transport.ondata.bind(transport);
-          transport.ondata = (transport_ref, url, msg, binary) => {
-            origOnData(transport_ref, url, msg, binary);
-            const text = typeof msg === 'string' ? msg
-                       : Buffer.isBuffer(msg) ? msg.toString('utf8') : null;
-            if (text) handleSipResponse(text);
-          };
-          transport._ok200hooked = true;
-          this._log('info', '[CAP] Hooked via transport.ondata');
-        }
-
-        // Also try the raw socket inside WebSocketInterface
-        const rawWs = transport.socket?._ws
-                   || transport.socket?.ws
-                   || transport.socket?._socket
-                   || transport.socket?.socket;
-        if (rawWs && typeof rawWs.on === 'function' && !rawWs._ok200hooked) {
-          rawWs.on('message', (data) => {
-            const text = typeof data === 'string' ? data
-                       : Buffer.isBuffer(data) ? data.toString('utf8') : null;
-            if (text) handleSipResponse(text);
-          });
-          rawWs._ok200hooked = true;
-          this._log('info', '[CAP] Hooked via transport.socket raw WS');
-        }
-
-        if (!transport._ok200hooked) {
-          this._log('warn', '[CAP] Could not hook inbound SIP — 100/200 will be missing from pcap');
-        }
-
-        if (!ws) return;
-        if (ws._ok200hooked) { this._log('info', '[CAP] Already hooked'); return; }
-
-        const handleMsg = (data) => {
-          const text = typeof data === 'string' ? data
-                     : Buffer.isBuffer(data)   ? data.toString('utf8')
-                     : typeof data?.toString === 'function' ? data.toString() : null;
-          if (!text || !text.startsWith('SIP/2.0')) return;
-          const firstLine = text.split('\r\n')[0] || text.split('\n')[0];
-          if (firstLine.includes(' 180 ')) return; // skip 180, captured via progress
-          const callId = this._pendingCallId || this.activeCall?.callId;
-          if (!callId) return;
-          const localIp = getLocalIp();
-          captureManager.writeSipMessage(callId, this.config?.server || '', 5060, localIp, 5060, text);
-          this._log('info', `[CAP] WS response: ${firstLine}`);
-        };
-
-        // Try all listener attachment methods
-        let attached = false;
-        if (typeof ws.on === 'function') {
-          ws.on('message', handleMsg);
-          attached = true;
-          this._log('info', '[CAP] Hooked via ws.on(message)');
-        }
-        if (!attached && typeof ws.addEventListener === 'function') {
-          ws.addEventListener('message', (evt) => handleMsg(evt.data));
-          attached = true;
-          this._log('info', '[CAP] Hooked via ws.addEventListener(message)');
-        }
-        if (!attached) {
-          // Wrap onmessage as last resort
-          const orig = ws.onmessage;
-          ws.onmessage = (evt) => {
-            if (orig) orig.call(ws, evt);
-            handleMsg(evt?.data || evt);
-          };
-          attached = true;
-          this._log('info', '[CAP] Hooked via ws.onmessage wrap');
-        }
-
-        if (attached) ws._ok200hooked = true;
-      } catch(e) {
-        this._log('warn', `[CAP] Hook failed: ${e.message}\n${e.stack}`);
-      }
-    }, 200);
+    if (!transportSocket || typeof transportSocket !== 'object') return;
+    if (transportSocket._sipCaptureHooked) return;
+    transportSocket._sipCaptureHooked = true;
+    transportSocket.onRawMessage = (text, direction) => {
+      const callId = this._pendingCallId || this.activeCall?.callId;
+      if (!callId) return;
+      const localIp = getLocalIp();
+      const server  = this.config?.server || '';
+      if (direction === 'in') captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, text);
+      else                    captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, text);
+    };
   }
 
   // ── Unregistered (ad-hoc) call ────────────────────────────────────────────
@@ -1695,8 +1597,9 @@ class SipManager extends EventEmitter {
     });
 
     // transport.socket is always the exact object passed to `sockets:[...]`
-    // (WebSocketInterface or UdpSocketInterface) — its send() return value
-    // tells us whether the transport is actually open, for both alike.
+    // (WsSocketInterface, UdpSocketInterface or TcpSocketInterface) — its
+    // send() return value tells us whether the transport is actually open,
+    // for all of them alike.
     if (!transport.socket.send(msg)) throw new Error('Transport not open');
 
     // Write the CSeq we just used back onto the dialog. JsSIP's own
