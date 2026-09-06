@@ -214,38 +214,24 @@ POST /api/register
 }
 ```
 
-**Transport values:** `UDP` (default, SIP over plaintext WebSocket — `ws://`), `TLS` (SIP over WebSocket Secure — `wss://`), `UDP-RAW` (raw SIP over UDP, no WebSocket), `TCP-RAW` (raw SIP over TCP), or `TLS-RAW` (raw SIP over TLS — SIPS). See [Raw UDP SIP Transport](#raw-udp-sip-transport) and [Raw TCP/TLS SIP Transport](#raw-tcptls-sip-transport-secure-sip) below. `wsPort`/`wsPath` apply to `UDP`/`TLS` only; `port` is the real destination port for the `*-RAW` transports (default `5060`); `allowSelfSigned` applies to `TLS-RAW` only.
+**Transport values:** `UDP` (default, SIP over plaintext WebSocket — `ws://`), `TLS` (SIP over WebSocket Secure — `wss://`), `UDP-RAW` (raw SIP over UDP, no WebSocket), `TCP-RAW` (raw SIP over TCP), or `TLS-RAW` (raw SIP over TLS — SIPS). `wsPort`/`wsPath` apply to `UDP`/`TLS` only; `port` is the real destination port for the `*-RAW` transports (default `5060`); `allowSelfSigned` applies to `TLS-RAW` only. Unregistered calling (below) supports all five transport values via the same fields. See CLAUDE.md for the raw UDP/TCP/TLS transports' implementation details.
 
-### Raw UDP SIP Transport
+### Secure Media (SRTP)
 
-Select **"UDP (raw, no WS)"** as the Transport to register and place calls over plain SIP-over-UDP — no WebSocket transport module required on the PBX side (works against a stock Asterisk/FreePBX/Kamailio `udp` binding on port 5060). The Transport dropdown hides the WebSocket-only fields (WS Port) when this option is selected, since the existing `Port` field becomes the real destination UDP port instead.
+Encrypted signaling (above) says nothing about the media itself — by default, RTP audio is always sent in the clear, regardless of SIP transport. Enable `secureMediaEnabled` via `POST /api/settings` to negotiate SDES-SRTP (`AES_CM_128_HMAC_SHA1_80`, RFC 3711/4568) on future calls instead.
 
-Implemented in `backend/udpSipSocket.js` as a custom JsSIP `Socket` — dialogs, digest authentication, REGISTER refresh, hold, transfer, conference, and DTMF are all unchanged from the WebSocket path (JsSIP's transaction/dialog layer is transport-agnostic). The one thing plugged in on top is retransmission: unlike SIP-over-WebSocket, UDP can drop packets, so `udpSipSocket.js` retransmits unacknowledged requests and final responses (doubling interval, ~32s timeout) — JsSIP itself doesn't do this for any transport.
-
-`SIP_PORT` (default `5060`) sets the local UDP port this transport binds to, in addition to its existing use as the pcap BPF filter port.
-
-Unregistered calling (below) also supports `UDP-RAW` via the same `transport` field.
-
-### Raw TCP/TLS SIP Transport (Secure SIP)
-
-Select **"TCP (raw, no WS)"** or **"TLS (raw, no WS)"** as the Transport for SIP over a raw TCP stream, optionally encrypted (SIPS). Implemented in `backend/tcpSipSocket.js`, reusing the exact same JsSIP integration approach as the raw UDP transport — no retransmission logic needed this time since TCP/TLS are reliable transports (only UDP needs that).
-
-The one thing genuinely new here: TCP/TLS are stream-based, so an incoming chunk of bytes doesn't necessarily correspond to one complete SIP message the way a UDP datagram does — a message can be split across multiple reads, or several messages can arrive in a single read. `tcpSipSocket.js` buffers incoming bytes and splits them into complete messages using each message's `Content-Length` header before handing them to JsSIP one at a time.
-
-For `TLS-RAW`, an **"Allow self-signed certificate"** toggle appears (defaults off — TLS verifies the cert normally unless enabled), since self-signed certs are extremely common on self-hosted PBXes.
-
-**Known limitation:** inbound calls depend on the PBX reusing the existing outbound connection to send the INVITE back down it (common in practice — the same assumption the WebSocket transport already relies on). This app doesn't run a listening TCP/TLS server to accept a fresh inbound connection from the PBX.
-
-Unregistered calling also supports `TCP-RAW`/`TLS-RAW` via the same `transport` field, plus `allowSelfSigned`.
+**v1 is opt-in and all-or-nothing:** when enabled, every leg this app originates offers SRTP exclusively (`m=audio ... RTP/SAVP` with an `a=crypto` line) — there's no parallel plain-RTP fallback offered alongside it. If the far end doesn't answer with compatible crypto (or the far end offers SRTP back when this app didn't ask for it), the SIP call still completes, but a clear warning is logged and audio will not decode correctly — only enable this against a PBX/endpoint you know supports SDES-SRTP. The crypto context persists across hold/resume on the same call; conference legs negotiate independently. Implemented in `backend/srtp.js` using only Node's built-in `crypto` module (no external SRTP dependency).
 
 ### Settings
 
-Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` default to `true`, matching the prior always-on behaviour; `autoRecordEnabled` defaults to `false`, since on-demand recording has always been opt-in. Changes take effect on the next call.
+Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` default to `true`, matching the prior always-on behaviour; `autoRecordEnabled` defaults to `false`, since on-demand recording has always been opt-in. Changes take effect on the next call. `noiseSuppressionEnabled` (default `true`) is the one exception — it applies immediately to any already-active call, not just the next one.
+
+`secureMediaEnabled` (default `false`) enables SDES-SRTP (`AES_CM_128_HMAC_SHA1_80`) on the RTP media path — see [Secure media (SRTP)](#secure-media-srtp) below. Like the other non-noise-suppression toggles, it only affects calls placed/answered after it's set.
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
-| `GET` | `/api/settings` | — | Current settings: `{captureEnabled, liveTranscriptEnabled, autoRecordEnabled}` |
-| `POST` | `/api/settings` | `{captureEnabled?, liveTranscriptEnabled?, autoRecordEnabled?}` | Update one or more settings |
+| `GET` | `/api/settings` | — | Current settings: `{captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled}` |
+| `POST` | `/api/settings` | `{captureEnabled?, liveTranscriptEnabled?, autoRecordEnabled?, noiseSuppressionEnabled?, secureMediaEnabled?}` | Update one or more settings |
 
 ### Calls
 
@@ -535,18 +521,6 @@ When registered, the SIP registration form locks and displays the active credent
 The layout adapts at 1100px (right panel drops below) and 768px (single column). Functional on tablets and large phone screens. The center dialer panel is capped at a comfortable max-width on wide desktop screens rather than stretching edge-to-edge.
 
 ---
-
-## Roadmap
-
-- [x] **Unregistered calling** — allow placing a call without an active SIP registration by entering `<address>@<sipdomain>` directly
-- [x] **Collapsible side panels** — toggle in the header to hide/show both the SIP Registration panel and the Captures/History/Transcript panel at once, to reclaim screen space
-- [x] **Vanilla SIP transport** — support raw SIP over UDP (not just SIP-over-WebSocket via JsSIP) to interoperate with PBXs/endpoints that don't offer a WS transport. Select "UDP (raw, no WS)" as the Transport. TCP is not implemented.
-- [x] **Vanilla TCP SIP support** — raw SIP over TCP via `backend/tcpSipSocket.js`. Select "TCP (raw, no WS)" as the Transport.
-- [x] **Secure SIP (SIPS/TLS)** — raw SIP over TLS (SIPS), encrypted signaling directly to the PBX, distinct from the existing WSS option (TLS at the WebSocket layer only). Select "TLS (raw, no WS)" as the Transport; an "Allow self-signed certificate" toggle appears for self-hosted PBXes.
-- [x] **Configurable pcap capture** — toggle in the left panel (`GET`/`POST /api/settings`, `captureEnabled`) to disable automatic pcap capture on calls
-- [x] **Configurable live transcript** — toggle in the left panel (`GET`/`POST /api/settings`, `liveTranscriptEnabled`) to disable automatic live transcription on calls
-- [x] **Auto-record option** — toggle in the left panel (`autoRecordEnabled` via `/api/settings`) to automatically start on-demand recording when a call connects, instead of requiring a manual click each time
-- [ ] **Non-containerized native client ports** — native Linux build (Rust), native macOS build, and native Windows build, as alternatives to running in a container
 
 ---
 
