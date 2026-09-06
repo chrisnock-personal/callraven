@@ -1656,16 +1656,34 @@ class SipManager extends EventEmitter {
   }
 
   // ── Blind transfer ────────────────────────────────────────────────────────
-  // Sends a REFER to the current call, telling the remote party to call target.
-  // The session ends automatically once the remote side picks up the transfer.
+  // Sends a REFER to the current call, telling the remote party to call
+  // target. Per RFC 5589, the far end (Asterisk here) reports the
+  // transfer's outcome back via NOTIFY on the REFER subscription — it does
+  // NOT reliably also send a BYE to end the transferor's own leg once that
+  // succeeds. Confirmed via a real call against this project's own CI
+  // Asterisk config (plain Dial(), no explicit bridge/transfer feature):
+  // the REFER-To target rang and answered correctly (visible in the NOTIFY
+  // sipfrags — 100 Trying, 180 Ringing, final 200 OK), but no BYE ever
+  // arrived — this.session stayed "connected" indefinitely. A well-behaved
+  // transferor is expected to end its own leg once it learns the transfer
+  // succeeded, rather than assume the PBX will do it — so that's done here
+  // explicitly via the REFER subscriber's 'accepted' event, instead of
+  // relying on a BYE that may never come.
   blindTransfer(target) {
     return new Promise((resolve, reject) => {
       if (!this.session || !this.session.isEstablished()) return reject(new Error('No active call'));
       const targetUri = this._normalizeUri(target);
       this._log('info', `Blind transfer -> ${targetUri}`);
       try {
-        this.session.refer(targetUri);
+        const referSubscriber = this.session.refer(targetUri);
         this._log('info', 'REFER sent');
+        referSubscriber.on('accepted', () => {
+          this._log('info', 'Transfer confirmed by REFER-To target — ending local leg');
+          try { this.session?.terminate(); } catch (e) { /* already ending */ }
+        });
+        referSubscriber.on('failed', (e) => {
+          this._log('warn', `Blind transfer failed per NOTIFY (status=${e?.status_line?.status_code})`);
+        });
         resolve({ target: targetUri });
       } catch (e) { reject(e); }
     });
@@ -1689,8 +1707,22 @@ class SipManager extends EventEmitter {
           this._log('info', 'Transfer target answered — completing attended transfer');
           try {
             // REFER first session to second session
-            this.session.refer(targetUri, { replaces: xferSession });
+            const referSubscriber = this.session.refer(targetUri, { replaces: xferSession });
             this._log('info', 'REFER with Replaces sent');
+            // Same reasoning as blindTransfer(): don't assume the PBX will
+            // send a BYE to end either of this endpoint's own legs once the
+            // transfer completes — end both explicitly once the REFER
+            // subscription reports success. (Confirmed via real-call
+            // testing: Asterisk left both PJSIP channels stuck "Up" with
+            // this project's plain-Dial() CI dialplan.)
+            referSubscriber.on('accepted', () => {
+              this._log('info', 'Attended transfer confirmed by REFER-To target — ending both local legs');
+              try { this.session?.terminate(); } catch (e) { /* already ending */ }
+              try { xferSession.terminate(); } catch (e) { /* already ending */ }
+            });
+            referSubscriber.on('failed', (e) => {
+              this._log('warn', `Attended transfer failed per NOTIFY (status=${e?.status_line?.status_code})`);
+            });
             this.confSession = null;
             resolve({ target: targetUri });
           } catch (e) {
