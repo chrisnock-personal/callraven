@@ -65,6 +65,7 @@ const srtp = require('./srtp');
 const { DtmfEventTracker } = require('./dtmfEvent');
 const opusCodec = require('./opusCodec');
 const { OPUS_PT, OPUS_SAMPLE_RATE, OPUS_TS_INCREMENT } = opusCodec;
+const siprec = require('./siprec');
 
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
@@ -366,6 +367,12 @@ class RtpBridge {
     this.onRawAudio = null;
     // Raw outbound relay: fires with each G.722 frame sent during WAV playback
     this.onRawOutboundAudio = null;
+    // SIPREC relay hooks — separate from onRawAudio/onRawOutboundAudio
+    // (which live transcription owns) so SIPREC can tap the same raw
+    // payloads without disturbing that existing wiring; set by
+    // SipManager._startSiprec, alongside whatever onRawAudio is doing.
+    this.onSiprecAudio = null;
+    this.onSiprecOutboundAudio = null;
     // Inbound RFC 4733 DTMF (telephone-event, PT 101): fn(digit, {durationMs})
     this.onDtmf = null;
     this._dtmfTracker = new DtmfEventTracker();
@@ -492,6 +499,10 @@ class RtpBridge {
         // Raw payload relay for live transcription (fires before any decoding)
         if (this.onRawAudio && !this.held) {
           this.onRawAudio(pt, payload);
+        }
+        // Raw payload relay for SIPREC (independent of onRawAudio above)
+        if (this.onSiprecAudio && !this.held) {
+          this.onSiprecAudio(pt, payload);
         }
 
         // RFC 4733 DTMF (telephone-event) — not audio, handled separately
@@ -628,6 +639,10 @@ class RtpBridge {
         // Raw outbound relay for live diarization
         if (this.onRawOutboundAudio) {
           this.onRawOutboundAudio(pt, frame);
+        }
+        // Raw outbound relay for SIPREC (independent of onRawOutboundAudio above)
+        if (this.onSiprecOutboundAudio) {
+          this.onSiprecOutboundAudio(pt, frame);
         }
       } catch (e) {
         console.error(`[WAV] Frame error: ${e.message}`);
@@ -847,6 +862,14 @@ class SipManager extends EventEmitter {
     // methods that need to read it (_dialOut, answerCall, _placeSecondaryLeg)
     // are on this class.
     this.secureMediaEnabled = false;
+    // SIPREC (RFC 7865/7866): when enabled with a server configured, every
+    // future primary call is also sent, as a separate recording session, to
+    // this SRS — see _startSiprec/_stopSiprec and siprec.js. Lives here for
+    // the same reason as secureMediaEnabled above (this class reads it
+    // directly at call-connect time).
+    this.siprecEnabled = false;
+    this.siprecServerUri = null;
+    this._siprecClient = null;
     // Tracks completion of the most recent raw re-INVITE (hold/resume) — see
     // _sendRawReInvite for why this needs to exist at all.
     this._reinviteAckWatcher = null; // { branch, resolve } while awaiting a response
@@ -1349,6 +1372,7 @@ class SipManager extends EventEmitter {
         if (remoteSdp) this._startRtp(remoteSdp);
       }
       this.emit('callConnected', { callId: this.activeCall?.callId, direction: session.direction });
+      this._startSiprec();
     });
     session.on('ended', (e) => {
       this._log('info', `Call ended: ${e.cause || 'normal'}`);
@@ -1433,11 +1457,14 @@ class SipManager extends EventEmitter {
       this.rtpBridge.onAudio    = null;
       this.rtpBridge.onRawAudio = null;
       this.rtpBridge.onDtmf     = null;
+      this.rtpBridge.onSiprecAudio         = null;
+      this.rtpBridge.onSiprecOutboundAudio = null;
       this.rtpBridge.stop();
       this.rtpBridge = null;
     }
     if (this.confBridge)  { this.confBridge.stop();   this.confBridge  = null; }
     if (this.confSession) { try { this.confSession.terminate(); } catch(e){} this.confSession = null; }
+    this._stopSiprec();
     this.session        = null;
     this.activeCall     = null;
     this.incomingCall   = null;
@@ -1482,6 +1509,61 @@ class SipManager extends EventEmitter {
 
   getSecureMedia() {
     return this.secureMediaEnabled;
+  }
+
+  // Configure SIPREC delivery for future calls. Takes effect on the next
+  // call — an already-active call isn't retroactively sent to the SRS.
+  setSiprecConfig({ enabled, serverUri } = {}) {
+    if (typeof enabled === 'boolean') this.siprecEnabled = enabled;
+    if (typeof serverUri === 'string') this.siprecServerUri = serverUri.trim() || null;
+    this._log('info', `SIPREC ${this.siprecEnabled ? 'enabled' : 'disabled'} for future calls${this.siprecServerUri ? ` (server: ${this.siprecServerUri})` : ''}`);
+    return this.getSiprecConfig();
+  }
+
+  getSiprecConfig() {
+    return { enabled: this.siprecEnabled, serverUri: this.siprecServerUri };
+  }
+
+  // Places a SIPREC recording-session INVITE to the configured SRS and, on
+  // success, taps the primary call's raw audio into it — see siprec.js for
+  // why this is a standalone raw SIP UAC rather than a second JsSIP UA/
+  // dialog. Failure here must never affect the primary call (matches how
+  // an SRTP negotiation mismatch only logs a warning, not an error) — a
+  // compliance recording pipe going down is not a reason to drop a call.
+  async _startSiprec() {
+    if (!this.siprecEnabled || !this.siprecServerUri || !this.rtpBridge) return;
+    const localAor  = this.config ? `sip:${this.config.username}@${this.config.server}` : 'sip:callraven@unknown';
+    const remoteAor = this.activeCall?.target || 'sip:unknown@unknown';
+    const client = new siprec.SiprecClient({
+      srsUri: this.siprecServerUri,
+      localIp: this.activeCall?.localIp || getLocalIp(),
+      localAor, localName: this.config?.displayName || null,
+      remoteAor, remoteName: null,
+    });
+    try {
+      await client.start();
+      // The primary call may have already ended (or a newer SIPREC client
+      // already be active) by the time this async start() resolves.
+      if (!this.rtpBridge || this._siprecClient) { client.stop().catch(() => {}); return; }
+      this._siprecClient = client;
+      this.rtpBridge.onSiprecAudio = (pt, payload) => {
+        client.feedRemote(payload, pt, pt === OPUS_PT ? OPUS_TS_INCREMENT : payload.length);
+      };
+      this.rtpBridge.onSiprecOutboundAudio = (pt, payload) => {
+        client.feedLocal(payload, pt, pt === OPUS_PT ? OPUS_TS_INCREMENT : payload.length);
+      };
+      this._log('info', `SIPREC: recording session established with ${this.siprecServerUri}`);
+    } catch (e) {
+      this._log('warn', `SIPREC: failed to start recording session: ${e.message}`);
+    }
+  }
+
+  _stopSiprec() {
+    if (this._siprecClient) {
+      const client = this._siprecClient;
+      this._siprecClient = null;
+      client.stop().catch(() => {});
+    }
   }
 
   unregister() {

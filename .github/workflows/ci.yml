@@ -132,6 +132,14 @@ jobs:
             --sip-server 127.0.0.1 \
             --sip-port 5060
 
+      - name: Run SIPREC call test
+        run: |
+          python3 ci/siprec_call_test.py \
+            --ep1-url http://localhost:3000 \
+            --ep2-url http://localhost:3001 \
+            --sip-server 127.0.0.1 \
+            --sip-port 5060
+
       - name: Dump logs on failure
         if: failure()
         run: |

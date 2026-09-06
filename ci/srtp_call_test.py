@@ -184,6 +184,14 @@ def main():
     wait_for(both_idle, args.teardown_wait, "both sides idle after hangup")
     log("OK: call torn down cleanly on both sides")
 
+    log("Step 12: Disable secureMediaEnabled again — it's a global setting, and a later CI "
+        "step reusing these same endpoints (e.g. a plain P2P call) would otherwise inherit "
+        "SRTP-mode SDP (RTP/SAVP) against endpoints that never negotiate it, and fail with "
+        "Asterisk's 'Couldn't negotiate stream ... (nothing)' for reasons that look nothing "
+        "like an SRTP problem")
+    set_secure_media(args.ep1_url, False)
+    set_secure_media(args.ep2_url, False)
+
     log("\nSRTP call test PASSED")
 
 

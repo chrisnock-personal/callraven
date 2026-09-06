@@ -168,7 +168,7 @@ python3 "Sample Scripts/sip_call_p2p_test.py"
 python3 "Sample Scripts/sip_call_ivr_test.py"
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus a Docker build, boot smoke test, a P2P call test, an Opus call test (confirms Opus is actually negotiated and real RTP flows with zero loss), and an SRTP call test (dedicated `media_encryption=sdes` endpoints, verifying real decrypted RTP flows with zero loss) against a throwaway Asterisk container.
+CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus a Docker build, boot smoke test, a P2P call test, an Opus call test (confirms Opus is actually negotiated and real RTP flows with zero loss), an SRTP call test (dedicated `media_encryption=sdes` endpoints, verifying real decrypted RTP flows with zero loss), and a SIPREC call test (against `ci/mock_siprec_server.py`, since no SIPREC-capable PBX exists to test against otherwise — verifies real metadata, RTP, and RTCP all arrive correctly) against a throwaway Asterisk container.
 
 ---
 
@@ -222,16 +222,24 @@ Encrypted signaling (above) says nothing about the media itself — by default, 
 
 **v1 is opt-in and all-or-nothing:** when enabled, every leg this app originates offers SRTP exclusively (`m=audio ... RTP/SAVP` with an `a=crypto` line) — there's no parallel plain-RTP fallback offered alongside it. If the far end doesn't answer with compatible crypto (or the far end offers SRTP back when this app didn't ask for it), the SIP call still completes, but a clear warning is logged and audio will not decode correctly — only enable this against a PBX/endpoint you know supports SDES-SRTP. The crypto context persists across hold/resume on the same call; conference legs negotiate independently. Implemented in `backend/srtp.js` using only Node's built-in `crypto` module (no external SRTP dependency).
 
+### Session Recording (SIPREC)
+
+Sends a copy of every call to an external SIP-REC compliance recording server (SRS), following RFC 7865 (metadata) / RFC 7866 (protocol) — CallRaven acts as the SRC (Session Recording Client). Enable `siprecEnabled` and set `siprecServerUri` (e.g. `sip:recorder@203.0.113.5:5060`) via `POST /api/settings`; every future call is then automatically sent as a separate recording session to that server for its duration, in addition to (not instead of) the call itself.
+
+The recorded media is **not** a literal copy of the call's RTP packets: per RFC 7866, each direction (inbound/outbound) is its own stream with a fresh SSRC/CNAME identity, sent `a=sendonly` with `a=rtcp-mux` (RTCP is required — the SRS needs it to associate SSRC with the metadata's participant/stream IDs). The recording-session dialog is a small, standalone raw SIP UAC (`backend/siprec.js`) — a brand-new dialog to an unrelated destination that has to coexist alongside the primary call, so it can't reuse JsSIP's session machinery. A failure to establish or maintain the recording session (unreachable SRS, rejected INVITE) is logged as a warning and never affects the primary call.
+
+No third-party dependencies: the RFC 7865 metadata XML is simple enough to hand-build as a template string, and RTCP Sender Report/SDES packets are hand-built per RFC 3550 the same way this app already hand-builds RTP packets elsewhere. There's no SIPREC-capable PBX to test against in this project's own CI infrastructure (Asterisk has no SIPREC support at all), so `ci/mock_siprec_server.py` stands in as a minimal reference SRS for both local testing and CI.
+
 ### Settings
 
 Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` default to `true`, matching the prior always-on behaviour; `autoRecordEnabled` defaults to `false`, since on-demand recording has always been opt-in. Changes take effect on the next call. `noiseSuppressionEnabled` (default `true`) is the one exception — it applies immediately to any already-active call, not just the next one.
 
-`secureMediaEnabled` (default `false`) enables SDES-SRTP (`AES_CM_128_HMAC_SHA1_80`) on the RTP media path — see [Secure media (SRTP)](#secure-media-srtp) below. Like the other non-noise-suppression toggles, it only affects calls placed/answered after it's set.
+`secureMediaEnabled` (default `false`) enables SDES-SRTP (`AES_CM_128_HMAC_SHA1_80`) on the RTP media path — see [Secure Media (SRTP)](#secure-media-srtp) above. `siprecEnabled`/`siprecServerUri` (both unset by default) configure sending calls to a SIP-REC server — see [Session Recording (SIPREC)](#session-recording-siprec) above. Like the other non-noise-suppression toggles, these only affect calls placed/answered after they're set.
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
-| `GET` | `/api/settings` | — | Current settings: `{captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled}` |
-| `POST` | `/api/settings` | `{captureEnabled?, liveTranscriptEnabled?, autoRecordEnabled?, noiseSuppressionEnabled?, secureMediaEnabled?}` | Update one or more settings |
+| `GET` | `/api/settings` | — | Current settings: `{captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled, siprecEnabled, siprecServerUri}` |
+| `POST` | `/api/settings` | `{captureEnabled?, liveTranscriptEnabled?, autoRecordEnabled?, noiseSuppressionEnabled?, secureMediaEnabled?, siprecEnabled?, siprecServerUri?}` | Update one or more settings |
 
 ### Calls
 

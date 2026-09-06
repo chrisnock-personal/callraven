@@ -203,20 +203,37 @@ const settings = {
 
 app.get('/api/status', (req, res) => res.json(sipManager.getState()));
 
+// Maps SipManager.getSiprecConfig()'s internal {enabled, serverUri} shape to
+// this API's siprecEnabled/siprecServerUri naming, consistent with every
+// other setting.
+function siprecSettingsFields() {
+  const { enabled, serverUri } = sipManager.getSiprecConfig();
+  return { siprecEnabled: enabled, siprecServerUri: serverUri };
+}
+
 app.get('/api/settings', (req, res) => res.json({
   ...settings,
   noiseSuppressionEnabled: sipManager.getNoiseSuppression(),
   secureMediaEnabled:      sipManager.getSecureMedia(),
+  ...siprecSettingsFields(),
 }));
 
 app.post('/api/settings', (req, res) => {
-  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled } = req.body;
+  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled, siprecEnabled, siprecServerUri } = req.body;
   if (typeof captureEnabled === 'boolean')          settings.captureEnabled          = captureEnabled;
   if (typeof liveTranscriptEnabled === 'boolean')   settings.liveTranscriptEnabled   = liveTranscriptEnabled;
   if (typeof autoRecordEnabled === 'boolean')       settings.autoRecordEnabled       = autoRecordEnabled;
   if (typeof noiseSuppressionEnabled === 'boolean') sipManager.setNoiseSuppression(noiseSuppressionEnabled);
   if (typeof secureMediaEnabled === 'boolean')      sipManager.setSecureMedia(secureMediaEnabled);
-  res.json({ ...settings, noiseSuppressionEnabled: sipManager.getNoiseSuppression(), secureMediaEnabled: sipManager.getSecureMedia() });
+  if (typeof siprecEnabled === 'boolean' || typeof siprecServerUri === 'string') {
+    sipManager.setSiprecConfig({ enabled: siprecEnabled, serverUri: siprecServerUri });
+  }
+  res.json({
+    ...settings,
+    noiseSuppressionEnabled: sipManager.getNoiseSuppression(),
+    secureMediaEnabled:      sipManager.getSecureMedia(),
+    ...siprecSettingsFields(),
+  });
 });
 
 app.get('/api/transcript/status', (req, res) => res.json({
