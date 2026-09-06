@@ -137,6 +137,18 @@ function parseRemoteSdp(sdp) {
   return ip && port ? { ip, port } : null;
 }
 
+// Minimal SIP response parse: status code + top Via branch, used to
+// correlate an inbound response with the raw re-INVITE _sendRawReInvite
+// sent (JsSIP's own transaction table doesn't know about that request, so
+// it can't do this matching for us — see _sendRawReInvite for why).
+function parseSipResponse(text) {
+  const statusMatch = text.match(/^SIP\/2\.0\s+(\d{3})/);
+  if (!statusMatch) return null;
+  const viaMatch    = text.match(/^Via:\s*([^\r\n]+)/mi);
+  const branchMatch = viaMatch ? viaMatch[1].match(/;branch=([^;,\s]+)/i) : null;
+  return { status: parseInt(statusMatch[1], 10), branch: branchMatch ? branchMatch[1] : null };
+}
+
 // ─── WAV header parser ────────────────────────────────────────────────────────
 function parseWavHeader(buf) {
   // Minimum WAV header is 44 bytes
@@ -664,6 +676,10 @@ class SipManager extends EventEmitter {
     // object, taking effect only on the next call), this one needs to be
     // readable here since it's pushed to a live bridge immediately.
     this.noiseSuppressionEnabled = true;
+    // Tracks completion of the most recent raw re-INVITE (hold/resume) — see
+    // _sendRawReInvite for why this needs to exist at all.
+    this._reinviteAckWatcher = null; // { branch, resolve } while awaiting a response
+    this._pendingReinviteAck = null; // Promise a subsequent raw re-INVITE awaits first
   }
 
   _log(level, message) {
@@ -863,6 +879,11 @@ class SipManager extends EventEmitter {
     if (transportSocket._sipCaptureHooked) return;
     transportSocket._sipCaptureHooked = true;
     transportSocket.onRawMessage = (text, direction) => {
+      // Complete the raw re-INVITE's transaction (see _sendRawReInvite) if
+      // this is its response — independent of the capture logic below, and
+      // checked first since it doesn't depend on a callId being resolvable.
+      if (direction === 'in') this._checkReinviteAckWatcher(text);
+
       const callId = this._pendingCallId || this.activeCall?.callId;
       if (!callId) return;
       const localIp = getLocalIp();
@@ -991,13 +1012,17 @@ class SipManager extends EventEmitter {
   // hold/resume — unlike ACK/BYE, there's no way to have JsSIP send this on
   // our behalf, so it has to be hand-assembled here rather than just
   // captured off the wire via _hookTransportCapture.
-  _buildSipMessage(method, dialog, { cseqOffset = 0, extraHeaders = [], body = null } = {}) {
+  _buildSipMessage(method, dialog, { cseqOffset = 0, extraHeaders = [], body = null, branch = null } = {}) {
     const { localUri, remoteUri, callId, localTag, remoteTag, cseq } = this._dialogFields(dialog, cseqOffset);
     const localIp      = this.activeCall?.localIp || getLocalIp();
     const viaTransport  = this.ua?._transport?.socket?.via_transport || 'WS';
+    // A caller that needs to correlate this request's response (there's no
+    // JsSIP transaction table backing this send — see _sendRawReInvite)
+    // passes an explicit branch; otherwise generate one as usual.
+    branch = branch || `z9hG4bK${Math.random().toString(36).slice(2)}`;
     return [
       `${method} ${remoteUri} SIP/2.0`,
-      `Via: SIP/2.0/${viaTransport} ${localIp};branch=z9hG4bK${Math.random().toString(36).slice(2)}`,
+      `Via: SIP/2.0/${viaTransport} ${localIp};branch=${branch}`,
       `Max-Forwards: 70`,
       `From: <${localUri}>;tag=${localTag}`,
       `To: <${remoteUri}>;tag=${remoteTag}`,
@@ -1420,8 +1445,11 @@ class SipManager extends EventEmitter {
       this._log('info', 'Putting call on hold');
       if (this.rtpBridge) this.rtpBridge.setHold(true);
       if (this.activeCall) this.activeCall.onHold = true;
-      try { this._sendRawReInvite(true); }
-      catch (e) { this._log('warn', `re-INVITE failed (${e.message}) — RTP muted only`); }
+      // Fire-and-forget: _sendRawReInvite is async (it may need to wait out
+      // a still-unACKed previous re-INVITE first — see its own comment),
+      // but hold() itself responds immediately without waiting on the
+      // network round trip, same as before.
+      this._sendRawReInvite(true).catch(e => this._log('warn', `re-INVITE failed (${e.message}) — RTP muted only`));
       this.emit('callHeld', { callId: this.activeCall?.callId });
       this._log('info', 'Call on hold');
       resolve({ onHold: true });
@@ -1439,18 +1467,95 @@ class SipManager extends EventEmitter {
       this._log('info', 'Resuming call');
       if (this.rtpBridge) this.rtpBridge.setHold(false);
       if (this.activeCall) this.activeCall.onHold = false;
-      try { this._sendRawReInvite(false); }
-      catch (e) { this._log('warn', `re-INVITE failed (${e.message}) — RTP resumed`); }
+      this._sendRawReInvite(false).catch(e => this._log('warn', `re-INVITE failed (${e.message}) — RTP resumed`));
       this.emit('callResumed', { callId: this.activeCall?.callId });
       this._log('info', 'Call resumed');
       resolve({ onHold: false });
     });
   }
 
+  // Matches an inbound response against the raw re-INVITE's response
+  // watcher, if one is pending — called from _hookTransportCapture's
+  // onRawMessage for every inbound message. See _sendRawReInvite for why
+  // this bookkeeping exists at all (JsSIP's transaction table doesn't know
+  // about that request, so it can't do this matching, or the required
+  // follow-up ACK, on its own).
+  _checkReinviteAckWatcher(text) {
+    const watcher = this._reinviteAckWatcher;
+    if (!watcher) return;
+    const parsed = parseSipResponse(text);
+    if (!parsed || !parsed.branch || parsed.branch !== watcher.branch) return;
+    watcher.onResponse(parsed.status);
+  }
+
+  // Waits for the response to a raw re-INVITE identified by `branch`, and
+  // sends the ACK it requires once it arrives — RFC 3261 17.1.1.3: a 2xx
+  // gets an ACK with a fresh branch (sent, and dialog-routed, independent
+  // of the original transaction); a non-2xx final response gets one that
+  // reuses the INVITE's own branch instead. Normally JsSIP's dialog/
+  // transaction layer does this automatically; since this request bypassed
+  // that layer entirely, it doesn't know to. Resolves once ACKed, rejected,
+  // or after a bounded timeout (so a far end that never responds — e.g. the
+  // call already ended — can't jam every future re-INVITE forever).
+  _waitForReinviteAck(branch, dialog, routeSet) {
+    const REINVITE_ACK_TIMEOUT_MS = 4000;
+    return new Promise((resolve) => {
+      let timer;
+      const finish = () => {
+        if (this._reinviteAckWatcher?.branch === branch) this._reinviteAckWatcher = null;
+        this._pendingReinviteAck = null;
+        clearTimeout(timer);
+        resolve();
+      };
+      // is2xx picks which flavor of ACK to build: a 2xx gets a fresh branch
+      // and the dialog's Route set; a non-2xx reuses the INVITE's own
+      // branch and no Route set (it's not dialog-routed).
+      const sendAck = (is2xx) => {
+        try {
+          const ackMsg = this._buildSipMessage('ACK', dialog, {
+            cseqOffset: 0,
+            branch: is2xx ? null : branch,
+            extraHeaders: is2xx ? routeSet : [],
+          });
+          this.ua?._transport?.socket?.send(ackMsg);
+        } catch (e) { this._log('warn', `Failed to ACK raw re-INVITE response: ${e.message}`); }
+      };
+
+      timer = setTimeout(() => {
+        this._log('warn', `No response to raw re-INVITE (branch=${branch}) after ${REINVITE_ACK_TIMEOUT_MS}ms — giving up`);
+        finish();
+      }, REINVITE_ACK_TIMEOUT_MS);
+
+      this._reinviteAckWatcher = {
+        branch,
+        onResponse: (status) => {
+          if (status < 200) return; // provisional — keep waiting
+          if (status < 300) {
+            sendAck(true);
+            this._log('info', `Sent ACK for raw re-INVITE 2xx (branch=${branch})`);
+          } else {
+            sendAck(false);
+            this._log('warn', `Raw re-INVITE rejected (status=${status}, branch=${branch})`);
+          }
+          finish();
+        },
+      };
+    });
+  }
+
   // ── Send raw re-INVITE via WebSocket ──────────────────────────────────────
   // Writes SIP directly to the transport WebSocket without touching any
   // JsSIP session or RTCPeerConnection methods.
-  _sendRawReInvite(hold) {
+  async _sendRawReInvite(hold) {
+    // Wait out any previous raw re-INVITE that hasn't been ACKed yet before
+    // sending a new one. RFC 3261 forbids a new in-dialog request while the
+    // previous INVITE transaction on the same dialog is still open, and
+    // Asterisk enforces it: without this, a resume shortly after a hold
+    // (or vice versa) gets rejected with 500 "Another INVITE transaction in
+    // progress" — the previous one was never actually completed, because
+    // nothing had ever sent it an ACK (see _waitForReinviteAck).
+    if (this._pendingReinviteAck) await this._pendingReinviteAck;
+
     const localIp = this.activeCall?.localIp || getLocalIp();
     const rtpPort = this.activeCall?.localRtpPort || 0;
     const sdp     = buildSdp(localIp, rtpPort, { hold });
@@ -1463,8 +1568,10 @@ class SipManager extends EventEmitter {
 
     const routeSet = (dialog.route_set || []).map(r => `Route: ${r}`).filter(Boolean);
     const { cseq } = this._dialogFields(dialog, 1);
+    const branch = `z9hG4bK${Math.random().toString(36).slice(2)}`;
     const msg = this._buildSipMessage('INVITE', dialog, {
       cseqOffset: 1,
+      branch,
       extraHeaders: [
         `Contact: <sip:${this.config.username}@${localIp}>`,
         ...routeSet,
@@ -1490,6 +1597,9 @@ class SipManager extends EventEmitter {
     // hold/resume never reaching the other side).
     dialog.local_seqnum = cseq;
     this._log('info', `Sent raw re-INVITE (hold=${hold}, cseq=${cseq})`);
+
+    this._pendingReinviteAck = this._waitForReinviteAck(branch, dialog, routeSet);
+    await this._pendingReinviteAck;
   }
 
 
