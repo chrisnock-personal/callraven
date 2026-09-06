@@ -666,6 +666,15 @@ class SipManager extends EventEmitter {
     // Conference: second leg
     this.confSession      = null;
     this.confBridge       = null;
+    // Which session _handleNewSession is about to receive: JsSIP fires
+    // 'newRTCSession' synchronously from inside ua.call() — before the
+    // caller gets the returned session back to assign it anywhere — so
+    // there's no way to tell "is this the primary call" from the session
+    // object alone at that moment. Callers placing a secondary leg (attended
+    // transfer's target, a conference third party) set this to 'secondary'
+    // immediately before calling ua.call(); _handleNewSession reads and
+    // resets it. See _placeSecondaryLeg.
+    this._nextSessionRole = 'primary';
     this.logs             = [];
     this.keepaliveTimer   = null;
     this.ipWatchTimer     = null;
@@ -1037,7 +1046,16 @@ class SipManager extends EventEmitter {
 
   // ── Session wiring ────────────────────────────────────────────────────────
   _handleNewSession(session) {
-    this._log('info', `New session direction=${session.direction}`);
+    // Incoming sessions are always primary-call candidates in this app's
+    // model (there's no such thing as an "incoming transfer/conference
+    // leg"). Outgoing sessions default to primary too (that's the vastly
+    // more common case, and _dialOut never gets a chance to set the flag
+    // before this fires — see _nextSessionRole's own comment) unless a
+    // caller placing a secondary leg explicitly marked the next one.
+    const isPrimary = session.direction === 'incoming' || this._nextSessionRole !== 'secondary';
+    this._nextSessionRole = 'primary';
+
+    this._log('info', `New session direction=${session.direction} role=${isPrimary ? 'primary' : 'secondary'}`);
     // SIP capture itself is handled entirely by _hookTransportCapture()'s
     // onRawMessage — it sees every byte actually sent/received on the wire,
     // for every transport. A session-level capture (JsSIP 'sending'/
@@ -1078,8 +1096,29 @@ class SipManager extends EventEmitter {
         }, delay);
       }
     }
-    // Patch receiveRequest to log every in-dialog method and intercept re-INVITE/UPDATE
-    // at the lowest level — JsSIP's reinvite/update events don't reliably fire headlessly
+    // Patch receiveRequest to log every in-dialog method — harmless/
+    // diagnostic-only, left unconditional for every session.
+    const _origReceiveRequest = session.receiveRequest.bind(session);
+    session.receiveRequest = (request) => {
+      console.log(`[IN-DIALOG] ${request.method}`);
+      return _origReceiveRequest(request);
+    };
+
+    // Everything below mutates primary-call state (this.activeCall,
+    // this.rtpBridge, call history, callConnected/Ended/Failed events) or
+    // reads it to decide what to do — none of it is safe to also run for a
+    // secondary leg (attended-transfer target, conference third party).
+    // Those legs already have their own correctly-scoped 'confirmed'/
+    // 'ended'/'failed' handlers wired by attendedTransfer()/conference()
+    // themselves; this used to run unconditionally for every outgoing
+    // session regardless, corrupting or outright killing the primary call
+    // whenever a transfer/conference attempt so much as rang or failed.
+    if (!isPrimary) return;
+
+    // Intercept re-INVITE/UPDATE at the lowest level — JsSIP's reinvite/
+    // update events don't reliably fire headlessly — to redirect
+    // this.rtpBridge when the PBX re-routes media mid-call (see the
+    // "PBX Media Redirection" section of the README).
     const _applyRemoteSdp = (label, request) => {
       const sdp = request.body || null;
       console.log(`[${label}] method=${request.method} hasBody=${!!sdp} hasRtpBridge=${!!this.rtpBridge}`);
@@ -1101,11 +1140,6 @@ class SipManager extends EventEmitter {
     session._receiveUpdate = (request) => {
       _applyRemoteSdp('UPDATE', request);
       return _origReceiveUpdate(request);
-    };
-    const _origReceiveRequest = session.receiveRequest.bind(session);
-    session.receiveRequest = (request) => {
-      console.log(`[IN-DIALOG] ${request.method}`);
-      return _origReceiveRequest(request);
     };
 
     session.on('progress', () => { this._log('info', 'Remote ringing'); if (this.activeCall) this.activeCall.status = 'ringing'; });
@@ -1603,6 +1637,24 @@ class SipManager extends EventEmitter {
   }
 
 
+  // Places an outgoing call for a secondary leg — an attended-transfer
+  // target or a conference third party — never the primary call. Marks
+  // this._nextSessionRole = 'secondary' immediately before ua.call() so
+  // _handleNewSession knows not to apply primary-call side effects to it
+  // (see that field's comment for why this can't just be inferred from the
+  // session object). The caller wires its own 'confirmed'/'ended'/'failed'
+  // handlers — this only builds the SDP, places the call, and injects the
+  // SDP into the outgoing INVITE, the part both callers do identically.
+  _placeSecondaryLeg(targetUri) {
+    const localIp = getLocalIp();
+    const rtpPort = allocateRtpPort();
+    const sdp     = buildSdp(localIp, rtpPort);
+    this._nextSessionRole = 'secondary';
+    const session = this.ua.call(targetUri, { mediaConstraints: { audio: false, video: false } });
+    session.on('sending', (e) => { if (e.request) e.request.body = sdp; });
+    return { session, localIp, rtpPort };
+  }
+
   // ── Blind transfer ────────────────────────────────────────────────────────
   // Sends a REFER to the current call, telling the remote party to call target.
   // The session ends automatically once the remote side picks up the transfer.
@@ -1630,14 +1682,8 @@ class SipManager extends EventEmitter {
 
       this._log('info', `Attended transfer: calling ${targetUri}`);
 
-      const localIp   = getLocalIp();
-      const rtpPort   = allocateRtpPort();
-      const sdp       = buildSdp(localIp, rtpPort);
-
       try {
-        const xferSession = this.ua.call(targetUri, { mediaConstraints: { audio: false, video: false } });
-
-        xferSession.on('sending', (e) => { if (e.request) e.request.body = sdp; });
+        const { session: xferSession } = this._placeSecondaryLeg(targetUri);
 
         xferSession.on('confirmed', () => {
           this._log('info', 'Transfer target answered — completing attended transfer');
@@ -1655,6 +1701,7 @@ class SipManager extends EventEmitter {
 
         xferSession.on('failed', (e) => {
           this._log('error', `Transfer leg failed: ${e.cause}`);
+          this.confSession = null;
           reject(new Error(`Transfer leg failed: ${e.cause}`));
         });
 
@@ -1677,14 +1724,8 @@ class SipManager extends EventEmitter {
 
       this._log('info', `Conferencing in: ${targetUri}`);
 
-      const localIp   = getLocalIp();
-      const rtpPort   = allocateRtpPort();
-      const sdp       = buildSdp(localIp, rtpPort);
-
       try {
-        const confSession = this.ua.call(targetUri, { mediaConstraints: { audio: false, video: false } });
-
-        confSession.on('sending', (e) => { if (e.request) e.request.body = sdp; });
+        const { session: confSession, rtpPort } = this._placeSecondaryLeg(targetUri);
 
         confSession.on('confirmed', () => {
           this._log('info', 'Conference leg connected');
