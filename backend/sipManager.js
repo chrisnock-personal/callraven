@@ -64,6 +64,7 @@ const { NoiseSuppressor } = require('./noiseSuppressor');
 const srtp = require('./srtp');
 const { DtmfEventTracker } = require('./dtmfEvent');
 const opusCodec = require('./opusCodec');
+const { JitterBuffer } = require('./jitterBuffer');
 const { OPUS_PT, OPUS_SAMPLE_RATE, OPUS_TS_INCREMENT } = opusCodec;
 const siprec = require('./siprec');
 
@@ -353,6 +354,7 @@ class RtpBridge {
     this.playTimer    = null;
     this.silenceTimer = null;
     this._rxWatchTimer = null;
+    this._jitterTimer  = null;
     this._lastRxTime   = 0;
     // RTP stats
     this.stats = {
@@ -388,6 +390,15 @@ class RtpBridge {
     // and 16kHz (G.722) are the only rates ever seen.
     this.nsEnabled = nsEnabled;
     this._ns = {};
+
+    // Reorders/paces decoded-audio consumers (browser relay, live
+    // transcription, SIPREC, DTMF, recording) — see jitterBuffer.js. The
+    // raw wire-order pass-through relay a few lines below in start()
+    // (this.socket.send(msg, ...)) is a separate concern (RTP proxying,
+    // not decode) and stays untouched by this.
+    this._jitter = new JitterBuffer({
+      onRelease: (packet) => this._consumeAudio(packet.pt, packet.payload, packet.ts, packet.heldAtArrival),
+    });
   }
 
   setNoiseSuppression(enabled) {
@@ -492,33 +503,15 @@ class RtpBridge {
           this.ssrc      = ssrc;
         }
 
-        // Audio relay to browser — always relay so Listen works during playback too
-        if (this.onAudio && !this.held) {
-          this._relayAudio(pt, payload);
-        }
-        // Raw payload relay for live transcription (fires before any decoding)
-        if (this.onRawAudio && !this.held) {
-          this.onRawAudio(pt, payload);
-        }
-        // Raw payload relay for SIPREC (independent of onRawAudio above)
-        if (this.onSiprecAudio && !this.held) {
-          this.onSiprecAudio(pt, payload);
-        }
-
-        // RFC 4733 DTMF (telephone-event) — not audio, handled separately
-        // from the onAudio/onRawAudio relays above.
-        if (pt === 101 && this.onDtmf) {
-          this._handleDtmfEvent(payload, ts);
-        }
-
-        // On-demand recording — write inbound audio regardless of playback state
-        if (this.recording && this.audioWriter) {
-          if (!this._loggedRecordPt) {
-            console.log('[REC] Recording inbound PT=' + pt + ' payload_len=' + payload.length);
-            this._loggedRecordPt = true;
-          }
-          this.audioWriter.write(pt, payload);
-        }
+        // Everything downstream of arrival (browser relay, live
+        // transcription, SIPREC, DTMF, recording) goes through the jitter
+        // buffer first, so minor reordering/bursty timing gets smoothed
+        // out before decode rather than hitting it in raw wire order.
+        // `held` is captured at arrival time, not read again at release
+        // time, so a hold/resume that happens to fall within the
+        // buffering window doesn't change which packets get gated —
+        // matches the pre-jitter-buffer behaviour exactly.
+        this._jitter.push(seq, ssrc, { pt, payload, ts, heldAtArrival: this.held });
       }
 
       // During WAV playback or hold, suppress forwarding inbound RTP to remote
@@ -534,6 +527,11 @@ class RtpBridge {
       console.log(`[RTP] bound ${addr.address}:${addr.port} -> ${this.remoteIp}:${this.remotePort}`);
       this._startRxWatch();
     });
+    // Drives the jitter buffer's release pacing — 20ms matches the
+    // packetization interval every codec this project negotiates uses
+    // (see playWav's FRAME_MS). A no-op tick while nothing is buffered is
+    // cheap, so this just runs for the life of the bridge.
+    this._jitterTimer = setInterval(() => this._jitter.tick(), 20);
   }
 
   // Send an RTP packet for the given payload type — all counters kept as
@@ -707,6 +705,39 @@ class RtpBridge {
     if (this._rxWatchTimer) { clearInterval(this._rxWatchTimer); this._rxWatchTimer = null; }
   }
 
+  // Called by the jitter buffer once a packet reaches the front of the
+  // queue in sequence order — this is the exact set of things that used
+  // to run inline in the socket 'message' handler, at arrival time.
+  _consumeAudio(pt, payload, ts, heldAtArrival) {
+    // Audio relay to browser — always relay so Listen works during playback too
+    if (this.onAudio && !heldAtArrival) {
+      this._relayAudio(pt, payload);
+    }
+    // Raw payload relay for live transcription (fires before any decoding)
+    if (this.onRawAudio && !heldAtArrival) {
+      this.onRawAudio(pt, payload);
+    }
+    // Raw payload relay for SIPREC (independent of onRawAudio above)
+    if (this.onSiprecAudio && !heldAtArrival) {
+      this.onSiprecAudio(pt, payload);
+    }
+
+    // RFC 4733 DTMF (telephone-event) — not audio, handled separately
+    // from the onAudio/onRawAudio relays above.
+    if (pt === 101 && this.onDtmf) {
+      this._handleDtmfEvent(payload, ts);
+    }
+
+    // On-demand recording — write inbound audio regardless of playback state
+    if (this.recording && this.audioWriter) {
+      if (!this._loggedRecordPt) {
+        console.log('[REC] Recording inbound PT=' + pt + ' payload_len=' + payload.length);
+        this._loggedRecordPt = true;
+      }
+      this.audioWriter.write(pt, payload);
+    }
+  }
+
   // Fires onDtmf once per digit — see DtmfEventTracker for the end-of-event
   // and misbehaving-peer-timeout logic.
   _handleDtmfEvent(payload, ts) {
@@ -809,6 +840,8 @@ class RtpBridge {
     this._stopRxWatch();
     this._stopSilence();
     this.stopPlayback();
+    if (this._jitterTimer) { clearInterval(this._jitterTimer); this._jitterTimer = null; }
+    this._jitter.stop();
     if (this.socket) {
       try { this.socket.close(); } catch (e) {}
       this.socket = null;

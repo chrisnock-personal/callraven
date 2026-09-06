@@ -486,6 +486,10 @@ If the WebSocket connection to the PBX drops mid-call:
 - JsSIP's built-in recovery attempts to reconnect
 - On reconnect, `wsConnected` is broadcast and the SIP capture hooks are re-attached
 
+### Jitter Buffer
+
+Inbound RTP passes through a small fixed-depth (3 packet) reordering/pacing buffer before decode, relay to the browser, live transcription, SIPREC, DTMF handling, or on-demand recording — packets are released in RTP sequence-number order at a steady 20ms cadence rather than being consumed the instant they arrive off the wire. This absorbs minor reordering and bursty/uneven arrival timing from real networks; a lost packet's slot is skipped rather than waited on indefinitely, and a source change (e.g. a re-INVITE swapping SSRC) re-primes the buffer immediately. Packet-loss and jitter stats (`RTP Stats Panel`) are still measured at actual arrival time, unaffected by this buffering.
+
 ---
 
 ## UI Features
