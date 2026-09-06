@@ -986,12 +986,11 @@ class SipManager extends EventEmitter {
 
   // Assembles a raw SIP request string (Via/Max-Forwards/From/To/Call-ID/CSeq
   // plus any extraHeaders and an optional body) from dialog-derived fields.
-  // Shared by two different uses: reconstructing ACK/BYE purely for pcap
-  // capture (JsSIP sends those itself via its own internal machinery, which
-  // doesn't reliably expose them for capture — see _hookSessionCapture's
-  // 'confirmed' handler and _captureOutboundBye), and _sendRawReInvite, which
-  // builds AND actually transmits the message, bypassing JsSIP's own
-  // re-INVITE/WebRTC-oriented call path for hold/resume.
+  // Used by _sendRawReInvite, which builds AND actually transmits the
+  // message, bypassing JsSIP's own re-INVITE/WebRTC-oriented call path for
+  // hold/resume — unlike ACK/BYE, there's no way to have JsSIP send this on
+  // our behalf, so it has to be hand-assembled here rather than just
+  // captured off the wire via _hookTransportCapture.
   _buildSipMessage(method, dialog, { cseqOffset = 0, extraHeaders = [], body = null } = {}) {
     const { localUri, remoteUri, callId, localTag, remoteTag, cseq } = this._dialogFields(dialog, cseqOffset);
     const localIp      = this.activeCall?.localIp || getLocalIp();
@@ -1011,103 +1010,18 @@ class SipManager extends EventEmitter {
     ].join('\r\n');
   }
 
-  // ── SIP capture via JsSIP session events ─────────────────────────────────
-  // Capture SIP signalling by listening to JsSIP session events which expose
-  // the raw SIP message objects — far more reliable than intercepting WebSocket.
-  // Called from _handleNewSession for each call leg.
-  _hookSessionCapture(session) {
-    const getSipText = (msg) => {
-      try {
-        if (!msg) return null;
-        // JsSIP IncomingMessage/OutgoingRequest have a toString()
-        if (typeof msg.toString === 'function') {
-          const t = msg.toString();
-          if (t && t.length > 10 && t !== '[object Object]') return t;
-        }
-        // Some events pass the raw data
-        if (typeof msg.data === 'string' && msg.data.length > 10) return msg.data;
-        // Try _message property (JsSIP wraps in some cases)
-        if (msg._message) return getSipText(msg._message);
-        return null;
-      } catch(e) { return null; }
-    };
-
-    const write = (msg, fromServer) => {
-      const callId  = this._pendingCallId || this.activeCall?.callId;
-      const text    = getSipText(msg);
-      if (!callId || !text) return;
-      const localIp = getLocalIp();
-      const server  = this.config?.server || '';
-      if (fromServer) {
-        captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, text);
-      } else {
-        captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, text);
-      }
-    };
-
-    // Outbound: INVITE, ACK, re-INVITE, BYE, OPTIONS
-    // 'sending' fires for ALL outbound SIP requests — most reliable capture point
-    session.on('sending', (e) => {
-      const method = e?.request?.method || e?.request?.ruri || 'unknown';
-      this._log('info', `[CAP] sending method=${method}`);
-      write(e.request, false);
-    });
-
-    // Inbound provisional responses: 100 Trying, 180 Ringing
-    // originator='remote' means Asterisk sent it; originator='local' is our own 100
-    session.on('progress', (e) => {
-      if (e?.originator === 'remote') {
-        write(e.response || e.message, true);
-      }
-    });
-
-    // 200 OK + ACK — captured by intercepting the session internals
-    // We store the 200 OK when progress fires (last response before confirmed)
-    // and the ACK by wrapping session._sendACK if it exists
-    session.on('progress', (e) => {
-      if (e?.originator === 'remote' && e?.response) {
-        // Store last response — the final one will be the 200 OK
-        session._lastCapturedResponse = e.response;
-      }
-    });
-
-    session.on('confirmed', (e) => {
-      // 200 OK captured via WebSocket message listener above
-      // ACK: build from dialog state (JsSIP sends the real ACK internally
-      // without exposing it for capture — same reason _captureOutboundBye
-      // exists for BYE)
-      const callId  = this._pendingCallId || this.activeCall?.callId;
-      if (!callId) return;
-      const localIp = getLocalIp();
-      const server  = this.config?.server || '';
-      try {
-        const dialog = session._dialog;
-        if (!dialog) return;
-        const ackText = this._buildSipMessage('ACK', dialog);
-        captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, ackText);
-        this._log('info', `[CAP] ACK written (${ackText.slice(0,30)})`);
-      } catch(ex) { this._log('warn', `[CAP] ACK capture error: ${ex.message}`); }
-    });
-
-    // In-dialog requests (re-INVITE, hold, etc.)
-    session.on('reinvite', (e) => {
-      if (e?.originator === 'remote') write(e.request, true);
-      else write(e.request, false);
-    });
-    session.on('update', (e) => {
-      if (e?.originator === 'remote') write(e.request, true);
-      else write(e.request, false);
-    });
-
-    // BYE and failed responses are captured directly in _handleNewSession
-    // before _teardown() closes the capture file — so we don't duplicate here
-  }
-
   // ── Session wiring ────────────────────────────────────────────────────────
   _handleNewSession(session) {
     this._log('info', `New session direction=${session.direction}`);
-    // Hook session events for SIP capture (reliable — uses JsSIP's own objects)
-    this._hookSessionCapture(session);
+    // SIP capture itself is handled entirely by _hookTransportCapture()'s
+    // onRawMessage — it sees every byte actually sent/received on the wire,
+    // for every transport. A session-level capture (JsSIP 'sending'/
+    // 'progress'/'confirmed' events, plus hand-reconstructing ACK/BYE
+    // because "JsSIP sends them internally without exposing them") used to
+    // exist alongside it and double-wrote most of the dialog into every
+    // pcap — see _sendRawReInvite/_buildSipMessage's remaining use for why
+    // that reconstruction approach still exists for the raw hold/resume
+    // re-INVITE, which is actually transmitted, not just captured.
     if (session.direction === 'incoming') {
       const inviteRequest = session._request || null;
       const remoteSdp     = inviteRequest?.body || null;
@@ -1183,18 +1097,10 @@ class SipManager extends EventEmitter {
     session.on('ended', (e) => {
       this._log('info', `Call ended: ${e.cause || 'normal'}`);
       const callId = this.activeCall?.callId;
-      // Capture remote BYE (local BYE already captured by _captureOutboundBye)
-      if (callId && e?.originator === 'remote' && e?.message) {
-        try {
-          const byeText = e.message.toString ? e.message.toString() : null;
-          if (byeText && byeText.length > 10 && !byeText.startsWith('[object')) {
-            const localIp = getLocalIp();
-            const server  = this.config?.server || '';
-            captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, byeText);
-            this._log('info', '[CAP] Remote BYE written');
-          }
-        } catch(ex) { this._log('warn', `BYE capture error: ${ex.message}`); }
-      }
+      // A remote BYE's bytes are already in the pcap via the transport hook
+      // by the time this fires (JsSIP processes the inbound packet, then
+      // dispatches this event, synchronously within the same call stack) —
+      // no separate capture needed here.
       if (callId) {
         const capFile = this.activeCall?.captureFile || null;
         const st      = this.rtpBridge ? this.rtpBridge.getStats() : null;
@@ -1206,18 +1112,6 @@ class SipManager extends EventEmitter {
     session.on('failed', (e) => {
       this._log('error', `Call failed: ${e.cause || 'unknown'}`);
       const callId = this.activeCall?.callId;
-      // Write failure response before teardown closes the capture
-      if (callId && (e?.message || e?.response)) {
-        try {
-          const msg  = e.message || e.response;
-          const text = msg.toString ? msg.toString() : null;
-          if (text && text.length > 10) {
-            const localIp = getLocalIp();
-            const server  = this.config?.server || '';
-            captureManager.writeSipMessage(callId, server, 5060, localIp, 5060, text);
-          }
-        } catch(ex) { /* ignore */ }
-      }
       if (callId) callHistory.failCall(callId, { cause: e.cause || null });
       this._teardown();
       this.emit('callFailed', { callId, cause: e.cause });
@@ -1480,34 +1374,17 @@ class SipManager extends EventEmitter {
   hangup() {
     return new Promise((resolve) => {
       if (this.session) {
-        try {
-          this._captureOutboundBye();
-          this.session.terminate();
-        } catch (e) { this._log('warn', `Hangup error: ${e.message}`); }
+        // session.terminate() sends the real BYE synchronously (before
+        // emitting 'ended'), so the transport hook has already captured it
+        // by the time _teardown() (on 'ended') closes the pcap writer — no
+        // separate reconstruction needed.
+        try { this.session.terminate(); }
+        catch (e) { this._log('warn', `Hangup error: ${e.message}`); }
       } else {
         this._teardown();
       }
       resolve();
     });
-  }
-
-  _captureOutboundBye() {
-    const callId  = this.activeCall?.callId;
-    if (!callId) return;
-    const localIp = getLocalIp();
-    const server  = this.config?.server || '';
-    try {
-      const dialog = this.session?._dialog;
-      if (!dialog) return;
-
-      const { localUri, remoteUri, cseq } = this._dialogFields(dialog, 1);
-      this._log('info', `[CAP] BYE dialog: remote=${remoteUri} local=${localUri} cseq=${cseq}`);
-      const byeText = this._buildSipMessage('BYE', dialog, { cseqOffset: 1 });
-      const written = captureManager.writeSipMessage(callId, localIp, 5060, server, 5060, byeText);
-      this._log('info', `[CAP] Outbound BYE ${written ? 'written to pcap' : 'FAILED'} callId=${callId?.slice(0,8)} byeLen=${byeText.length} firstLine=${byeText.split('\r\n')[0]}`);
-    } catch(e) {
-      this._log('warn', `BYE capture error: ${e.message}`);
-    }
   }
 
   // ── Reject inbound ────────────────────────────────────────────────────────
