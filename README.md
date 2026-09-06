@@ -470,9 +470,9 @@ Powered by a statically-compiled `whisper-cli` (whisper.cpp) baked into the Dock
 
 ## Reliability Features
 
-### Asterisk `direct_media` / Re-INVITE Handling
+### PBX Media Redirection / Re-INVITE Handling
 
-The RTP bridge tracks the actual source address/port of inbound RTP packets rather than trusting SDP alone. If Asterisk re-routes media directly between endpoints (`direct_media`) or sends a re-INVITE, the bridge detects the source change on the next received packet and updates its target instead of relying on SDP parsing to catch every case. In-dialog re-INVITE/UPDATE requests are also intercepted directly at the transaction layer (not just JsSIP's `reinvite` event, which doesn't reliably fire headlessly) so SDP changes are always applied.
+The RTP bridge tracks the actual source address/port of inbound RTP packets rather than trusting SDP alone. If the PBX re-routes media directly between endpoints — Asterisk calls this `direct_media`; other PBXes/SBCs have equivalent settings under different names — or sends a re-INVITE, the bridge detects the source change on the next received packet and updates its target instead of relying on SDP parsing to catch every case. In-dialog re-INVITE/UPDATE requests are also intercepted directly at the transaction layer (not just JsSIP's `reinvite` event, which doesn't reliably fire headlessly) so SDP changes are always applied. This is generic SIP/RTP handling, not Asterisk-specific — Asterisk is just the PBX this project is actually tested against.
 
 ### OPTIONS Keepalive
 
@@ -644,7 +644,7 @@ SDP advertises G.722 as the preferred codec. If the PBX does not support G.722, 
 - **On-demand recording** — separate from the always-on pcap; start/stop at any point during a call, saves both rx and tx WAV files
 - **Live audio relay** — inbound RTP is decoded and streamed to the browser via a dedicated WebSocket endpoint for real-time listening
 - **Transcription** — on-device Whisper.cpp (statically compiled, no external API calls); live transcription during calls plus on-demand post-call transcription with speaker diarization
-- **Direct media aware** — the RTP bridge tracks the actual source of inbound packets, so Asterisk `direct_media` re-routing and re-INVITEs are handled correctly
+- **PBX media-redirection aware** — the RTP bridge tracks the actual source of inbound packets, so mid-call media re-routing (Asterisk's `direct_media`, or the equivalent on other PBXes/SBCs) and re-INVITEs are handled correctly
 
 ---
 
