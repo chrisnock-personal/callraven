@@ -168,7 +168,7 @@ python3 "Sample Scripts/sip_call_p2p_test.py"
 python3 "Sample Scripts/sip_call_ivr_test.py"
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus a Docker build, boot smoke test, and a P2P call test against a throwaway Asterisk container.
+CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus a Docker build, boot smoke test, a P2P call test, and an SRTP call test (dedicated `media_encryption=sdes` endpoints, verifying real decrypted RTP flows with zero loss) against a throwaway Asterisk container.
 
 ---
 
