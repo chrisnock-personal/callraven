@@ -437,6 +437,7 @@ Powered by a statically-compiled `whisper-cli` (whisper.cpp) baked into the Dock
 | `callMissed` | `{callId, from}` | Inbound call missed (far end cancelled) |
 | `callHeld` | `{callId}` | Call put on hold |
 | `callResumed` | `{callId}` | Call resumed from hold |
+| `dtmfReceived` | `{callId, digit, durationMs}` | Far end pressed a DTMF digit (RFC 4733 telephone-event) |
 | `remoteHold` | `{callId}` | Far end put call on hold (a=sendonly) |
 | `remoteHoldReleased` | `{callId}` | Far end resumed call (a=sendrecv) |
 | `conferenceStarted` | `{target}` | Conference leg connected |
@@ -590,7 +591,7 @@ curl -O $BASE/api/transcripts/rec_<callid>_<ts>_rx.wav/text
 | G.722 | 9 | Send + Receive | Preferred. 16kHz wideband ADPCM. WAV files converted to G.722 at upload. |
 | PCMU (G.711 μ-law) | 0 | Send + Receive | 8kHz narrowband. Fallback. |
 | PCMA (G.711 A-law) | 8 | Send + Receive | 8kHz narrowband. Fallback. |
-| telephone-event | 101 | Advertised only | Advertised in SDP for RFC 2833 capability, but `/api/dtmf` actually sends DTMF via SIP INFO (JsSIP's default) — see the Calls section below. |
+| telephone-event | 101 | Send: SIP INFO. Receive: RTP (RFC 4733) | `/api/dtmf` sends DTMF via SIP INFO (JsSIP's default), not as an RTP event — see the Calls section below. Inbound digits the far end presses **are** detected from the RTP stream (`dtmfReceived` WebSocket event, see Event Reference). A digit is normally reported the moment its RFC 4733 end packet arrives; if the far end never sends one, it's still reported after ~1.5s of continuous mid-event packets rather than silently dropped — confirmed necessary against a real Asterisk 20.6.0, whose SIP-INFO-to-RFC4733 DTMF relay does not reliably set the end bit and can occasionally emit more than one event for what was a single keypress. |
 
 SDP advertises G.722 as the preferred codec. If the PBX does not support G.722, it falls back to PCMU or PCMA automatically.
 

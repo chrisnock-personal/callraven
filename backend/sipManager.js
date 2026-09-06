@@ -62,6 +62,7 @@ const callHistory    = require('./callHistory');
 const { AudioWriter } = require('./audioDecoder');
 const { NoiseSuppressor } = require('./noiseSuppressor');
 const srtp = require('./srtp');
+const { DtmfEventTracker } = require('./dtmfEvent');
 
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
@@ -314,6 +315,9 @@ class RtpBridge {
     this.onRawAudio = null;
     // Raw outbound relay: fires with each G.722 frame sent during WAV playback
     this.onRawOutboundAudio = null;
+    // Inbound RFC 4733 DTMF (telephone-event, PT 101): fn(digit, {durationMs})
+    this.onDtmf = null;
+    this._dtmfTracker = new DtmfEventTracker();
     // On-demand recording flag (distinct from always-on audioWriter)
     this.recording  = false;
     this.audioWriter = null;  // inbound (remote) recorder
@@ -432,6 +436,12 @@ class RtpBridge {
         // Raw payload relay for live transcription (fires before any decoding)
         if (this.onRawAudio && !this.held) {
           this.onRawAudio(pt, payload);
+        }
+
+        // RFC 4733 DTMF (telephone-event) — not audio, handled separately
+        // from the onAudio/onRawAudio relays above.
+        if (pt === 101 && this.onDtmf) {
+          this._handleDtmfEvent(payload, ts);
         }
 
         // On-demand recording — write inbound audio regardless of playback state
@@ -591,6 +601,13 @@ class RtpBridge {
 
   _stopRxWatch() {
     if (this._rxWatchTimer) { clearInterval(this._rxWatchTimer); this._rxWatchTimer = null; }
+  }
+
+  // Fires onDtmf once per digit — see DtmfEventTracker for the end-of-event
+  // and misbehaving-peer-timeout logic.
+  _handleDtmfEvent(payload, ts) {
+    const result = this._dtmfTracker.process(payload, ts);
+    if (result) this.onDtmf(result.digit, { durationMs: result.durationMs });
   }
 
   // Suppress noise on decoded PCM and relay it to onAudio, if attached.
@@ -1280,6 +1297,10 @@ class SipManager extends EventEmitter {
     }
     const srtpOpts = (localSrtp && remote.remoteCrypto) ? { localSrtp, remoteSrtp: remote.remoteCrypto } : null;
     this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled, srtpOpts);
+    this.rtpBridge.onDtmf = (digit, info) => {
+      this._log('info', `DTMF received: ${digit}`);
+      this.emit('dtmfReceived', { callId: this.activeCall?.callId, digit, durationMs: info.durationMs });
+    };
 
     this.rtpBridge.start();
   }
@@ -1315,6 +1336,7 @@ class SipManager extends EventEmitter {
       this._log('info', `Call stats — codec:${stats.codec} rx:${stats.rxPackets}pkts tx:${stats.txPackets}pkts lost:${stats.lostPackets} jitter:${stats.jitterMs}ms`);
       this.rtpBridge.onAudio    = null;
       this.rtpBridge.onRawAudio = null;
+      this.rtpBridge.onDtmf     = null;
       this.rtpBridge.stop();
       this.rtpBridge = null;
     }
