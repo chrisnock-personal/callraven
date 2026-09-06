@@ -2,13 +2,14 @@
   "openapi": "3.1.0",
   "info": {
     "title": "CallRaven API",
-    "description": "REST API for a containerized SIP softphone endpoint. Supports SIP registration, inbound/outbound calls, hold/resume, blind and attended transfer, 3-way conference, WAV file playback into the RTP stream, on-demand call recording, live RTP statistics, per-call packet capture (full SIP dialog + RTP), call history, and system logging.\n\nAll endpoints accept and return `application/json` unless stated otherwise. Real-time events are delivered via WebSocket at `ws://<host>:<port>` (control) and decoded PCM audio at `ws://<host>:<port>/audio` (live audio relay).",
-    "version": "1.1.0",
+    "description": "REST API for a containerized SIP softphone endpoint. Supports SIP registration (and unregistered/anonymous calling), inbound/outbound calls, hold/resume, blind and attended transfer, 3-way conference, WAV file playback into the RTP stream, on-demand call recording, live RTP statistics, per-call packet capture (full SIP dialog + RTP), call history, on-device Whisper transcription (live and post-call), global feature toggles, and system logging.\n\nAll endpoints accept and return `application/json` unless stated otherwise. Real-time events are delivered via WebSocket at `ws://<host>:<port>` (control), decoded PCM audio at `ws://<host>:<port>/audio` (live audio relay), and live transcript text at `ws://<host>:<port>/transcript`.",
+    "version": "1.2.0",
     "contact": {
       "name": "CallRaven"
     },
     "license": {
-      "name": "MIT"
+      "name": "PolyForm Noncommercial 1.0.0",
+      "url": "https://polyformproject.org/licenses/noncommercial/1.0.0/"
     }
   },
   "servers": [
@@ -65,6 +66,14 @@
     {
       "name": "Statistics",
       "description": "Live RTP stats for the active call"
+    },
+    {
+      "name": "Settings",
+      "description": "Global feature toggles (capture, live transcript, auto-record, noise suppression)"
+    },
+    {
+      "name": "Transcription",
+      "description": "On-device Whisper transcription \u2014 live status and on-demand post-call jobs"
     }
   ],
   "paths": {
@@ -1176,6 +1185,452 @@
           }
         }
       }
+    },
+    "/api/settings": {
+      "get": {
+        "tags": [
+          "Settings"
+        ],
+        "summary": "Get current settings",
+        "description": "Returns the current global feature toggles.",
+        "operationId": "getSettings",
+        "responses": {
+          "200": {
+            "description": "Current settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Settings"
+        ],
+        "summary": "Update settings",
+        "description": "Updates one or more global feature toggles. captureEnabled/liveTranscriptEnabled/autoRecordEnabled take effect on the next call; noiseSuppressionEnabled is pushed to any already-active call immediately.",
+        "operationId": "updateSettings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/transcript/status": {
+      "get": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Get live transcription status",
+        "description": "Whisper availability, whether live transcription is currently active, window size, and connected /transcript WebSocket client count.",
+        "operationId": "getTranscriptStatus",
+        "responses": {
+          "200": {
+            "description": "Live transcription status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/call/anonymous": {
+      "post": {
+        "tags": [
+          "Calls"
+        ],
+        "summary": "Place an unregistered (ad-hoc) call",
+        "description": "Places a call without an active SIP registration, connecting a throwaway UA directly to the target's SIP domain \u2014 there's no account, just a caller-ID string presented in the From header. Only usable while not registered and idle (409 otherwise). A per-call pcap capture is started automatically unless disabled in Settings.",
+        "operationId": "makeAnonymousCall",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnonymousCallRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Call initiated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "callId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "target": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "example": "calling"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/history/{callId}": {
+      "delete": {
+        "tags": [
+          "History"
+        ],
+        "summary": "Delete one history entry and its files",
+        "description": "Deletes the history entry plus any pcap, on-demand recording, and transcript files matching this call's ID prefix.",
+        "operationId": "deleteHistoryEntry",
+        "parameters": [
+          {
+            "name": "callId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/history/{callId}/capture": {
+      "delete": {
+        "tags": [
+          "History"
+        ],
+        "summary": "Delete only the capture files for a history entry",
+        "description": "Deletes the pcap and any on-demand recording WAV files matching this call's ID prefix, keeping the history entry and transcript (if any).",
+        "operationId": "deleteHistoryCapture",
+        "parameters": [
+          {
+            "name": "callId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/history/{callId}/transcript": {
+      "delete": {
+        "tags": [
+          "History"
+        ],
+        "summary": "Delete only the transcript for a history entry",
+        "description": "Deletes the transcript JSON matching this call's ID prefix, keeping the history entry and capture files.",
+        "operationId": "deleteHistoryTranscript",
+        "parameters": [
+          {
+            "name": "callId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/transcripts": {
+      "get": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "List all post-call transcripts",
+        "description": "Lists all saved post-call transcript JSON files in /captures.",
+        "operationId": "listTranscripts",
+        "responses": {
+          "200": {
+            "description": "Transcript list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "transcripts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Transcript"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/transcribe/{filename}": {
+      "post": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Start post-call transcription of a recording",
+        "description": "Starts an async transcription job for a rec_*.wav on-demand recording. The paired _tx.wav file (local/outbound channel) is auto-detected from the rx filename unless txFile is given explicitly \u2014 if found, the transcript is diarized. Returns 503 if Whisper isn't available in this build.",
+        "operationId": "startTranscription",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "rec_6a8bd8e8_1780000000000_rx.wav"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "txFile": {
+                    "type": "string",
+                    "nullable": true,
+                    "example": "rec_6a8bd8e8_1780000000000_tx.wav"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Job started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "example": "processing"
+                        },
+                        "filename": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/transcribe/{filename}/status": {
+      "get": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Poll a transcription job's status",
+        "operationId": "getTranscribeJobStatus",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "rec_6a8bd8e8_1780000000000_rx.wav"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscribeJobStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/transcripts/{filename}": {
+      "delete": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Delete a saved transcript",
+        "description": "Accepts either the rec_*.wav or rec_*.json filename.",
+        "operationId": "deleteTranscript",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "rec_6a8bd8e8_1780000000000.json"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/transcripts/{filename}/text": {
+      "get": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Download a transcript as plain text",
+        "description": "Accepts either the rec_*.wav or rec_*.json filename. Response is `text/plain`, one `[mm:ss] text` line per segment.",
+        "operationId": "downloadTranscriptText",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "rec_6a8bd8e8_1780000000000.json"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript text",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1378,6 +1833,11 @@
               "connected"
             ]
           },
+          "onHold": {
+            "type": "boolean",
+            "example": false,
+            "description": "True if this side has put the call on hold"
+          },
           "remoteHold": {
             "type": "boolean",
             "example": false,
@@ -1443,6 +1903,19 @@
         "properties": {
           "registered": {
             "type": "boolean"
+          },
+          "autoAnswer": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "example": false
+              },
+              "delayMs": {
+                "type": "integer",
+                "example": 0
+              }
+            }
           },
           "config": {
             "$ref": "#/components/schemas/SIPConfig",
@@ -1541,6 +2014,16 @@
             "type": "string",
             "example": "sip:1113@pbx.local"
           },
+          "from": {
+            "type": "string",
+            "nullable": true,
+            "example": "sip:1112@pbx.local"
+          },
+          "to": {
+            "type": "string",
+            "nullable": true,
+            "example": "sip:1113@pbx.local"
+          },
           "displayName": {
             "type": "string",
             "example": "Bob"
@@ -1575,6 +2058,55 @@
             "type": "string",
             "nullable": true,
             "example": "/captures/call_2026-04-28T08-46-53_6a8bd8e8.pcap"
+          },
+          "audioFile": {
+            "type": "string",
+            "nullable": true,
+            "example": "rec_6a8bd8e8_1780000000000_rx.wav",
+            "description": "On-demand recording (rx channel), if one was made and GET /api/history's enrichment found it"
+          },
+          "audioUrl": {
+            "type": "string",
+            "nullable": true,
+            "example": "/captures/rec_6a8bd8e8_1780000000000_rx.wav"
+          },
+          "transcriptFile": {
+            "type": "string",
+            "nullable": true,
+            "example": "rec_6a8bd8e8_1780000000000.json",
+            "description": "Post-call transcript JSON, if one was generated"
+          },
+          "codec": {
+            "type": "string",
+            "nullable": true,
+            "example": "G722/16kHz"
+          },
+          "rxPackets": {
+            "type": "integer",
+            "nullable": true,
+            "example": 1400
+          },
+          "txPackets": {
+            "type": "integer",
+            "nullable": true,
+            "example": 1400
+          },
+          "jitterMs": {
+            "type": "integer",
+            "nullable": true,
+            "example": 3
+          },
+          "packetLoss": {
+            "type": "string",
+            "nullable": true,
+            "description": "Loss percentage as a string, e.g. \"0.0\"",
+            "example": "0.0"
+          },
+          "cause": {
+            "type": "string",
+            "nullable": true,
+            "description": "SIP/JsSIP failure cause, populated when status is failed",
+            "example": "Rejected"
           }
         }
       },
@@ -1627,6 +2159,218 @@
             "description": "Call duration in seconds"
           }
         }
+      },
+      "Settings": {
+        "type": "object",
+        "properties": {
+          "captureEnabled": {
+            "type": "boolean",
+            "example": true,
+            "description": "Automatic per-call pcap capture on the next call"
+          },
+          "liveTranscriptEnabled": {
+            "type": "boolean",
+            "example": true,
+            "description": "Automatic live transcription on the next call (if Whisper is available)"
+          },
+          "autoRecordEnabled": {
+            "type": "boolean",
+            "example": false,
+            "description": "Automatic on-demand recording start on the next call"
+          },
+          "noiseSuppressionEnabled": {
+            "type": "boolean",
+            "example": true,
+            "description": "Real-time noise suppression on the live-listen /audio relay. Unlike the other three settings, this one is pushed to any already-active call immediately rather than only taking effect on the next call."
+          }
+        }
+      },
+      "SettingsRequest": {
+        "type": "object",
+        "description": "All fields optional; only fields present in the body are updated.",
+        "properties": {
+          "captureEnabled": {
+            "type": "boolean"
+          },
+          "liveTranscriptEnabled": {
+            "type": "boolean"
+          },
+          "autoRecordEnabled": {
+            "type": "boolean"
+          },
+          "noiseSuppressionEnabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TranscriptStatus": {
+        "type": "object",
+        "properties": {
+          "whisperAvailable": {
+            "type": "boolean",
+            "description": "False if the image was built without Whisper support"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Current liveTranscriptEnabled setting"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "True if a LiveTranscriber is currently running for an active call"
+          },
+          "windowMs": {
+            "type": "integer",
+            "example": 6000,
+            "description": "Live transcription flush interval (TRANSCRIPT_WINDOW_MS)"
+          },
+          "clients": {
+            "type": "integer",
+            "description": "Number of currently-connected /transcript WebSocket clients"
+          }
+        }
+      },
+      "AnonymousCallRequest": {
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Must be in the form <address>@<sipdomain> \u2014 a bare extension can't be resolved without a registered server",
+            "example": "alice@pbx.example.com"
+          },
+          "displayName": {
+            "type": "string",
+            "example": "Front Desk",
+            "description": "Caller-ID display name presented in the From header (default: \"anonymous\")"
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "UDP",
+              "TLS",
+              "UDP-RAW",
+              "TCP-RAW",
+              "TLS-RAW"
+            ],
+            "description": "Default: UDP (WebSocket)"
+          },
+          "port": {
+            "type": "integer",
+            "description": "Destination port for the *-RAW transports (default 5060)"
+          },
+          "wsPort": {
+            "type": "integer",
+            "description": "WebSocket port, applies to UDP/TLS transports only"
+          },
+          "wsPath": {
+            "type": "string",
+            "example": "/ws"
+          },
+          "allowSelfSigned": {
+            "type": "boolean",
+            "description": "TLS-RAW only \u2014 accept a self-signed certificate"
+          }
+        }
+      },
+      "TranscriptSegment": {
+        "type": "object",
+        "properties": {
+          "startSec": {
+            "type": "number",
+            "example": 1.24
+          },
+          "endSec": {
+            "type": "number",
+            "example": 3.86
+          },
+          "text": {
+            "type": "string",
+            "example": "Hello, how can I help you today?"
+          },
+          "speaker": {
+            "type": "string",
+            "enum": [
+              "Remote",
+              "Local"
+            ],
+            "description": "Present only when the transcript is diarized (a paired tx channel contributed segments)"
+          }
+        }
+      },
+      "Transcript": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "example": "rec_6a8bd8e8_1780000000000.json"
+          },
+          "recFilename": {
+            "type": "string",
+            "example": "rec_6a8bd8e8_1780000000000_rx.wav"
+          },
+          "model": {
+            "type": "string",
+            "example": "whisper-small.en"
+          },
+          "diarized": {
+            "type": "boolean",
+            "description": "True if a paired _tx.wav channel contributed segments"
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration": {
+            "type": "number",
+            "description": "Seconds, taken from the last segment's endSec"
+          },
+          "wordCount": {
+            "type": "integer"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TranscriptSegment"
+            }
+          },
+          "text": {
+            "type": "string",
+            "description": "Full transcript text, prefixed [Remote]/[Local] per segment when diarized"
+          }
+        }
+      },
+      "TranscribeJobStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "processing",
+              "done",
+              "error"
+            ]
+          },
+          "startedAt": {
+            "type": "integer",
+            "description": "Unix ms timestamp"
+          },
+          "finishedAt": {
+            "type": "integer",
+            "description": "Unix ms timestamp, present once status is done"
+          },
+          "transcriptFile": {
+            "type": "string",
+            "nullable": true,
+            "example": "rec_6a8bd8e8_1780000000000.json"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "Present only when status is error"
+          }
+        }
       }
     },
     "responses": {
@@ -1662,6 +2406,16 @@
       },
       "Error": {
         "description": "Internal server error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "Feature unavailable (e.g. Whisper not present in this build)",
         "content": {
           "application/json": {
             "schema": {
