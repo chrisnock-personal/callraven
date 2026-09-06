@@ -1096,11 +1096,46 @@ class SipManager extends EventEmitter {
         }, delay);
       }
     }
-    // Patch receiveRequest to log every in-dialog method — harmless/
-    // diagnostic-only, left unconditional for every session.
+    // Patch receiveRequest to log every in-dialog method, and to bridge a
+    // real race confirmed via an attended-transfer test call: JsSIP only
+    // accepts NOTIFY/REFER/INFO/UPDATE while the session is exactly
+    // STATUS_CONFIRMED (9) — everything else gets a flat 403 "Wrong
+    // Status", including while WAITING_FOR_ACK (6) for an in-dialog
+    // INVITE's answer. That's normally a vanishingly narrow window, but
+    // this app's headless RTCPeerConnection stub (see the top of this
+    // file) still needs one real setTimeout(0) event-loop turn per
+    // in-dialog INVITE to signal ICE-gathering-complete before JsSIP
+    // replies — confirmed, by instrumenting session._status directly
+    // across a real call, that a REFER subscription's own completion
+    // NOTIFY can land in that window when Asterisk fires off a
+    // back-to-back re-INVITE (its own direct_media renegotiation) right
+    // around the same time. A 403 there is final — the far end won't
+    // retry a rejected request on its own — so the NOTIFY carrying "your
+    // transfer succeeded" was silently and permanently lost, and
+    // blindTransfer/attendedTransfer's REFER-accepted handling (which
+    // depends on exactly that NOTIFY reaching the ReferSubscriber) never
+    // fired. Bridge the gap on our side instead: defer these methods
+    // until the session returns to CONFIRMED (bounded, so a session stuck
+    // for some other reason doesn't hang a request forever — it just
+    // falls through to JsSIP's normal 403 at that point, same as today).
+    const RETRIABLE_METHODS = new Set(['NOTIFY', 'REFER', 'INFO', 'UPDATE', 'MESSAGE']);
+    const STATUS_CONFIRMED  = 9;
+    const RETRY_INTERVAL_MS = 25;
+    const RETRY_DEADLINE_MS = 2000;
     const _origReceiveRequest = session.receiveRequest.bind(session);
     session.receiveRequest = (request) => {
       console.log(`[IN-DIALOG] ${request.method}`);
+      if (session._status !== STATUS_CONFIRMED && RETRIABLE_METHODS.has(request.method)) {
+        const deadline = Date.now() + RETRY_DEADLINE_MS;
+        const tryNow = () => {
+          if (session._status === STATUS_CONFIRMED || Date.now() >= deadline) {
+            return _origReceiveRequest(request);
+          }
+          setTimeout(tryNow, RETRY_INTERVAL_MS);
+        };
+        tryNow();
+        return;
+      }
       return _origReceiveRequest(request);
     };
 
