@@ -61,6 +61,7 @@ const { clamp16 }    = require('./pcmUtils');
 const callHistory    = require('./callHistory');
 const { AudioWriter } = require('./audioDecoder');
 const { NoiseSuppressor } = require('./noiseSuppressor');
+const srtp = require('./srtp');
 
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
@@ -105,36 +106,42 @@ function getLocalIp() {
 // but actual audio is 16kHz ADPCM.
 // `hold: true` sends sendonly (tells the remote to stop sending RTP) instead
 // of the normal sendrecv.
-function buildSdp(localIp, rtpPort, { hold = false } = {}) {
+// `srtp: {key, salt}` offers SDES-SRTP exclusively for this leg (RTP/SAVP +
+// an a=crypto line) instead of plain RTP/AVP — see SipManager.secureMediaEnabled.
+function buildSdp(localIp, rtpPort, { hold = false, srtp: localSrtp = null } = {}) {
   const id = Date.now();
-  return [
+  const proto = localSrtp ? 'RTP/SAVP' : 'RTP/AVP';
+  const lines = [
     'v=0',
     `o=CallRaven ${id} ${id} IN IP4 ${localIp}`,
     's=CallRaven Call',
     `c=IN IP4 ${localIp}`,
     't=0 0',
-    `m=audio ${rtpPort} RTP/AVP 9 0 8 101`,
+    `m=audio ${rtpPort} ${proto} 9 0 8 101`,
     'a=rtpmap:9 G722/8000',
     'a=rtpmap:0 PCMU/8000',
     'a=rtpmap:8 PCMA/8000',
     'a=rtpmap:101 telephone-event/8000',
     'a=fmtp:101 0-16',
-    hold ? 'a=sendonly' : 'a=sendrecv',
-    ''
-  ].join('\r\n');
+  ];
+  if (localSrtp) lines.push(srtp.buildCryptoAttr(1, localSrtp));
+  lines.push(hold ? 'a=sendonly' : 'a=sendrecv', '');
+  return lines.join('\r\n');
 }
 
 function parseRemoteSdp(sdp) {
   if (!sdp) return null;
   const lines = sdp.split(/\r?\n/);
-  let ip = null, port = null;
+  let ip = null, port = null, secure = false;
   for (const line of lines) {
     const c = line.match(/^c=IN IP4 (.+)/);
     if (c) ip = c[1].trim();
-    const m = line.match(/^m=audio (\d+)/);
-    if (m) port = parseInt(m[1]);
+    const m = line.match(/^m=audio (\d+) (\S+)/);
+    if (m) { port = parseInt(m[1]); secure = m[2] === 'RTP/SAVP'; }
   }
-  return ip && port ? { ip, port } : null;
+  if (!ip || !port) return null;
+  const remoteCrypto = secure ? srtp.parseCryptoAttr(sdp) : null;
+  return { ip, port, remoteCrypto };
 }
 
 // Minimal SIP response parse: status code + top Via branch, used to
@@ -270,12 +277,22 @@ function convertToUlaw8k(raw, fmt) {
 
 // ─── RTP bridge ──────────────────────────────────────────────────────────────
 class RtpBridge {
-  constructor(localPort, remoteIp, remotePort, callId, nsEnabled = true) {
+  constructor(localPort, remoteIp, remotePort, callId, nsEnabled = true, srtpOpts = null) {
     this.localPort   = localPort;
     this.remoteIp    = remoteIp;
     this.remotePort  = remotePort;
     this.callId      = callId;
     this.localIp     = getLocalIp();
+    // SDES-SRTP contexts, one per direction — both present or both absent
+    // (negotiation happened before this bridge was constructed; see
+    // SipManager._startRtp/conference()). Derived once here since key
+    // derivation rate 0 means the session keys never change mid-call.
+    this._txCrypto = (srtpOpts && srtpOpts.localSrtp && srtpOpts.remoteSrtp)
+      ? { sessionKeys: srtp.deriveSessionKeys(srtpOpts.localSrtp.key, srtpOpts.localSrtp.salt), roc: 0, lastSeq: null }
+      : null;
+    this._rxCrypto = (srtpOpts && srtpOpts.localSrtp && srtpOpts.remoteSrtp)
+      ? { sessionKeys: srtp.deriveSessionKeys(srtpOpts.remoteSrtp.key, srtpOpts.remoteSrtp.salt), roc: 0, lastSeq: null }
+      : null;
     this.socket      = null;
     this.ssrc        = (Math.random() * 0xffffffff) >>> 0;
     this.seq         = (Math.random() * 0xffff)     >>> 0;
@@ -335,6 +352,25 @@ class RtpBridge {
       captureManager.writeRtpPacket(this.callId, rinfo.address, rinfo.port, this.localIp, this.localPort, msg);
 
       if (msg.length >= 12) {
+        // SRTP: header stays in the clear, only the payload is encrypted —
+        // seq/ts/ssrc/pt below still read straight off `msg` either way.
+        // A failed auth/decrypt drops the packet entirely (no stats, relay,
+        // recording, or forwarding) rather than risk processing tampered
+        // audio — see srtp.js's decryptVerify for why rxCrypto state is
+        // only advanced on success.
+        let payload = msg.slice(12);
+        if (this._rxCrypto) {
+          const result = srtp.decryptVerify(this._rxCrypto, msg);
+          if (!result) {
+            if (!this._loggedSrtpAuthFail) {
+              console.warn('[SRTP] Inbound packet failed auth/decrypt — dropping (further failures logged silently)');
+              this._loggedSrtpAuthFail = true;
+            }
+            return;
+          }
+          payload = result.payload;
+        }
+
         const seq  = msg.readUInt16BE(2);
         const ts   = msg.readUInt32BE(4);
         const ssrc = msg.readUInt32BE(8);
@@ -391,20 +427,20 @@ class RtpBridge {
 
         // Audio relay to browser — always relay so Listen works during playback too
         if (this.onAudio && !this.held) {
-          this._relayAudio(pt, msg.slice(12));
+          this._relayAudio(pt, payload);
         }
         // Raw payload relay for live transcription (fires before any decoding)
         if (this.onRawAudio && !this.held) {
-          this.onRawAudio(pt, msg.slice(12));
+          this.onRawAudio(pt, payload);
         }
 
         // On-demand recording — write inbound audio regardless of playback state
         if (this.recording && this.audioWriter) {
           if (!this._loggedRecordPt) {
-            console.log('[REC] Recording inbound PT=' + pt + ' payload_len=' + (msg.length-12));
+            console.log('[REC] Recording inbound PT=' + pt + ' payload_len=' + payload.length);
             this._loggedRecordPt = true;
           }
-          this.audioWriter.write(pt, msg.slice(12));
+          this.audioWriter.write(pt, payload);
         }
       }
 
@@ -432,13 +468,19 @@ class RtpBridge {
       this.seq       = (this.seq + 1) & 0xffff;
       this.timestamp = (this.timestamp + payload.length) >>> 0;
 
-      const pkt = Buffer.alloc(12 + payload.length);
-      pkt[0] = 0x80;  // V=2, P=0, X=0, CC=0
-      pkt[1] = pt;    // M=0, PT=pt
-      pkt.writeUInt16BE(this.seq, 2);
-      pkt.writeUInt32BE(this.timestamp >>> 0, 4);
-      pkt.writeUInt32BE(this.ssrc >>> 0, 8);
-      payload.copy(pkt, 12);
+      const header = Buffer.alloc(12);
+      header[0] = 0x80;  // V=2, P=0, X=0, CC=0
+      header[1] = pt;    // M=0, PT=pt
+      header.writeUInt16BE(this.seq, 2);
+      header.writeUInt32BE(this.timestamp >>> 0, 4);
+      header.writeUInt32BE(this.ssrc >>> 0, 8);
+
+      // SRTP encrypts the payload and appends an 80-bit auth tag over
+      // header+ciphertext; the pcap capture below records exactly what
+      // goes on the wire either way.
+      const pkt = this._txCrypto
+        ? srtp.encrypt(this._txCrypto, header, payload)
+        : Buffer.concat([header, payload]);
 
       this.socket.send(pkt, this.remotePort, this.remoteIp);
       this.stats.txPackets++;
@@ -685,6 +727,13 @@ class SipManager extends EventEmitter {
     // object, taking effect only on the next call), this one needs to be
     // readable here since it's pushed to a live bridge immediately.
     this.noiseSuppressionEnabled = true;
+    // SDES-SRTP toggle. Unlike noiseSuppressionEnabled, this can't be pushed
+    // to a live call — crypto is negotiated once at INVITE/answer time — so
+    // it only affects calls placed/answered after being set. Lives here
+    // rather than in server.js's `settings` object because the SDP-building
+    // methods that need to read it (_dialOut, answerCall, _placeSecondaryLeg)
+    // are on this class.
+    this.secureMediaEnabled = false;
     // Tracks completion of the most recent raw re-INVITE (hold/resume) — see
     // _sendRawReInvite for why this needs to exist at all.
     this._reinviteAckWatcher = null; // { branch, resolve } while awaiting a response
@@ -1223,7 +1272,14 @@ class SipManager extends EventEmitter {
     if (this.rtpBridge) this.rtpBridge.stop();
     const localPort = this.activeCall?.localRtpPort || allocateRtpPort();
     const callId    = this.activeCall?.callId;
-    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled);
+    const localSrtp = this.activeCall?.localSrtp || null;
+    if (localSrtp && !remote.remoteCrypto) {
+      this._log('warn', 'Offered SRTP but remote answer had no compatible crypto — audio will not decode correctly');
+    } else if (!localSrtp && remote.remoteCrypto) {
+      this._log('warn', 'Remote answer offered SRTP but we did not request it — ignoring');
+    }
+    const srtpOpts = (localSrtp && remote.remoteCrypto) ? { localSrtp, remoteSrtp: remote.remoteCrypto } : null;
+    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled, srtpOpts);
 
     this.rtpBridge.start();
   }
@@ -1297,6 +1353,19 @@ class SipManager extends EventEmitter {
     return this.noiseSuppressionEnabled;
   }
 
+  // Toggle SDES-SRTP for future calls. Takes effect on the next call placed
+  // or answered — see this.secureMediaEnabled's constructor comment for why
+  // there's nothing to push to an already-active call.
+  setSecureMedia(enabled) {
+    this.secureMediaEnabled = !!enabled;
+    this._log('info', `Secure media (SRTP) ${this.secureMediaEnabled ? 'enabled' : 'disabled'} for future calls`);
+    return this.secureMediaEnabled;
+  }
+
+  getSecureMedia() {
+    return this.secureMediaEnabled;
+  }
+
   unregister() {
     return new Promise((resolve) => {
       this._stopKeepalive();
@@ -1326,9 +1395,10 @@ class SipManager extends EventEmitter {
   // Shared by makeCall() (registered dial) and makeUnregisteredCall() (ad-hoc dial).
   _dialOut(targetUri, callId) {
     return new Promise((resolve, reject) => {
-      const localIp = getLocalIp();
-      const rtpPort = allocateRtpPort();
-      const sdp     = buildSdp(localIp, rtpPort);
+      const localIp  = getLocalIp();
+      const rtpPort  = allocateRtpPort();
+      const localSrtp = this.secureMediaEnabled ? srtp.generateMasterKeySalt() : null;
+      const sdp      = buildSdp(localIp, rtpPort, { srtp: localSrtp });
       this._log('info', `Calling ${targetUri} | local RTP ${localIp}:${rtpPort}`);
       try {
         this.session = this.ua.call(targetUri, { mediaConstraints: { audio: false, video: false } });
@@ -1340,7 +1410,7 @@ class SipManager extends EventEmitter {
           }
         });
         this._pendingCallId = callId;
-        this.activeCall = { callId, target: targetUri, direction: 'outbound', startTime: null, status: 'calling', localRtpPort: rtpPort, localIp };
+        this.activeCall = { callId, target: targetUri, direction: 'outbound', startTime: null, status: 'calling', localRtpPort: rtpPort, localIp, localSrtp };
         const localUri = this.config ? `${this.config.username}@${this.config.server}` : null;
         callHistory.addCall({ callId, direction: 'outbound', target: targetUri, from: localUri, to: targetUri });
         resolve({ target: targetUri, callId, status: 'calling' });
@@ -1353,13 +1423,14 @@ class SipManager extends EventEmitter {
     return new Promise((resolve, reject) => {
       if (!this.incomingCall) return reject(new Error('No incoming call'));
       const { session, from, displayName, remoteSdp } = this.incomingCall;
-      const localIp = getLocalIp();
-      const rtpPort = allocateRtpPort();
-      const sdp     = buildSdp(localIp, rtpPort);
+      const localIp   = getLocalIp();
+      const rtpPort   = allocateRtpPort();
+      const localSrtp = this.secureMediaEnabled ? srtp.generateMasterKeySalt() : null;
+      const sdp       = buildSdp(localIp, rtpPort, { srtp: localSrtp });
       this._log('info', `Answering ${from} | local RTP ${localIp}:${rtpPort}`);
       if (remoteSdp) captureManager.writeSipMessage(callId, this.config.server, 5060, localIp, 5060, remoteSdp);
       this._pendingCallId = callId;
-      this.activeCall   = { callId, target: from, direction: 'inbound', startTime: null, status: 'connecting', localRtpPort: rtpPort, localIp };
+      this.activeCall   = { callId, target: from, direction: 'inbound', startTime: null, status: 'connecting', localRtpPort: rtpPort, localIp, localSrtp };
       this.session      = session;
       this.incomingCall = null;
       session.on('sdp', (e) => { this._log('info', `SDP event type=${e.type}`); e.sdp = sdp; });
@@ -1627,7 +1698,9 @@ class SipManager extends EventEmitter {
 
     const localIp = this.activeCall?.localIp || getLocalIp();
     const rtpPort = this.activeCall?.localRtpPort || 0;
-    const sdp     = buildSdp(localIp, rtpPort, { hold });
+    // Reuse the same SRTP key across hold/resume — same RtpBridge/crypto
+    // context throughout, only a=sendonly/a=sendrecv changes.
+    const sdp     = buildSdp(localIp, rtpPort, { hold, srtp: this.activeCall?.localSrtp || null });
 
     const dialog = this.session?._dialog;
     if (!dialog) throw new Error('No SIP dialog');
@@ -1681,13 +1754,14 @@ class SipManager extends EventEmitter {
   // handlers — this only builds the SDP, places the call, and injects the
   // SDP into the outgoing INVITE, the part both callers do identically.
   _placeSecondaryLeg(targetUri) {
-    const localIp = getLocalIp();
-    const rtpPort = allocateRtpPort();
-    const sdp     = buildSdp(localIp, rtpPort);
+    const localIp   = getLocalIp();
+    const rtpPort   = allocateRtpPort();
+    const localSrtp = this.secureMediaEnabled ? srtp.generateMasterKeySalt() : null;
+    const sdp       = buildSdp(localIp, rtpPort, { srtp: localSrtp });
     this._nextSessionRole = 'secondary';
     const session = this.ua.call(targetUri, { mediaConstraints: { audio: false, video: false } });
     session.on('sending', (e) => { if (e.request) e.request.body = sdp; });
-    return { session, localIp, rtpPort };
+    return { session, localIp, rtpPort, localSrtp };
   }
 
   // ── Blind transfer ────────────────────────────────────────────────────────
@@ -1792,7 +1866,7 @@ class SipManager extends EventEmitter {
       this._log('info', `Conferencing in: ${targetUri}`);
 
       try {
-        const { session: confSession, rtpPort } = this._placeSecondaryLeg(targetUri);
+        const { session: confSession, rtpPort, localSrtp } = this._placeSecondaryLeg(targetUri);
 
         confSession.on('confirmed', () => {
           this._log('info', 'Conference leg connected');
@@ -1801,7 +1875,11 @@ class SipManager extends EventEmitter {
             const remote = parseRemoteSdp(remoteSdp);
             if (remote) {
               this._log('info', `Conference RTP: remote=${remote.ip}:${remote.port}`);
-              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId, this.noiseSuppressionEnabled);
+              if (localSrtp && !remote.remoteCrypto) {
+                this._log('warn', 'Conference leg: offered SRTP but remote answer had no compatible crypto');
+              }
+              const srtpOpts = (localSrtp && remote.remoteCrypto) ? { localSrtp, remoteSrtp: remote.remoteCrypto } : null;
+              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId, this.noiseSuppressionEnabled, srtpOpts);
               this.confBridge.start();
 
               // Cross-wire: forward packets from leg1 to leg2 and vice versa

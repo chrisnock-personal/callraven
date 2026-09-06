@@ -2182,6 +2182,11 @@
             "type": "boolean",
             "example": true,
             "description": "Real-time noise suppression on the live-listen /audio relay. Unlike the other three settings, this one is pushed to any already-active call immediately rather than only taking effect on the next call."
+          },
+          "secureMediaEnabled": {
+            "type": "boolean",
+            "example": false,
+            "description": "SDES-SRTP on RTP media (AES_CM_128_HMAC_SHA1_80). Unlike noiseSuppressionEnabled, this only takes effect on the next call placed or answered, not any already-active call, and requires the far end to answer with compatible SRTP \u2014 this app does not fall back to plain RTP mid-negotiation, so an incompatible far end will not have working audio."
           }
         }
       },
@@ -2199,6 +2204,9 @@
             "type": "boolean"
           },
           "noiseSuppressionEnabled": {
+            "type": "boolean"
+          },
+          "secureMediaEnabled": {
             "type": "boolean"
           }
         }

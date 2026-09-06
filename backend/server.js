@@ -185,9 +185,12 @@ captureManager.on('captureReady', (data) => {
 // captureEnabled/liveTranscriptEnabled default on, matching prior always-on
 // behaviour. autoRecordEnabled defaults off, since on-demand recording has
 // always been opt-in per call. All take effect on the next call. (Noise
-// suppression is a separate toggle owned by sipManager itself — see
-// sipManager.setNoiseSuppression()/getNoiseSuppression() — since it's pushed
-// to any live bridge immediately rather than waiting for the next call.)
+// suppression and secure media/SRTP are separate toggles owned by sipManager
+// itself — see sipManager.setNoiseSuppression()/getNoiseSuppression() and
+// setSecureMedia()/getSecureMedia() — since sipManager needs to read them
+// directly: noise suppression is pushed to any live bridge immediately,
+// and secure media is read at INVITE/answer time inside sipManager's own
+// SDP-building methods.)
 const settings = {
   captureEnabled:        true,
   liveTranscriptEnabled: true,
@@ -201,15 +204,17 @@ app.get('/api/status', (req, res) => res.json(sipManager.getState()));
 app.get('/api/settings', (req, res) => res.json({
   ...settings,
   noiseSuppressionEnabled: sipManager.getNoiseSuppression(),
+  secureMediaEnabled:      sipManager.getSecureMedia(),
 }));
 
 app.post('/api/settings', (req, res) => {
-  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled } = req.body;
+  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled } = req.body;
   if (typeof captureEnabled === 'boolean')          settings.captureEnabled          = captureEnabled;
   if (typeof liveTranscriptEnabled === 'boolean')   settings.liveTranscriptEnabled   = liveTranscriptEnabled;
   if (typeof autoRecordEnabled === 'boolean')       settings.autoRecordEnabled       = autoRecordEnabled;
   if (typeof noiseSuppressionEnabled === 'boolean') sipManager.setNoiseSuppression(noiseSuppressionEnabled);
-  res.json({ ...settings, noiseSuppressionEnabled: sipManager.getNoiseSuppression() });
+  if (typeof secureMediaEnabled === 'boolean')      sipManager.setSecureMedia(secureMediaEnabled);
+  res.json({ ...settings, noiseSuppressionEnabled: sipManager.getNoiseSuppression(), secureMediaEnabled: sipManager.getSecureMedia() });
 });
 
 app.get('/api/transcript/status', (req, res) => res.json({
