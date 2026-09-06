@@ -1072,7 +1072,7 @@ class SipManager extends EventEmitter {
         this._log('info', `Auto-answer in ${delay}ms`);
         setTimeout(() => {
           if (this.incomingCall) {
-            const callId = require('uuid').v4();
+            const callId = require('crypto').randomUUID();
             this.answerCall(callId).catch(err => this._log('error', `Auto-answer failed: ${err.message}`));
           }
         }, delay);
@@ -1633,7 +1633,6 @@ class SipManager extends EventEmitter {
       const localIp   = getLocalIp();
       const rtpPort   = allocateRtpPort();
       const sdp       = buildSdp(localIp, rtpPort);
-      const xferCallId = require('uuid').v4();
 
       try {
         const xferSession = this.ua.call(targetUri, { mediaConstraints: { audio: false, video: false } });
