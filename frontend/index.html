@@ -278,6 +278,28 @@
     .switch input:checked + .slider { background: var(--blue); }
     .switch input:checked + .slider::before { transform: translateX(16px); }
 
+    /* ── Recording destination picker ───────────────────────────────── */
+    .section-label {
+      font-size: 10.5px; font-weight: 600; color: var(--text-dim); letter-spacing: 0.06em;
+      text-transform: uppercase; padding: 12px 0 6px;
+    }
+    .dest-row { padding: 8px 0 10px; }
+    .dest-picker {
+      display: flex; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 3px; gap: 3px;
+    }
+    .dest-option {
+      flex: 1; text-align: center; padding: 6px 8px; border-radius: 6px; font-size: 12.5px; font-weight: 500;
+      color: var(--text-mid); cursor: pointer; transition: all 0.15s; user-select: none;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .dest-option:hover { color: var(--text); }
+    .dest-option.active { background: var(--surface); color: var(--blue); box-shadow: var(--shadow-sm); }
+    .dest-option svg { width: 13px; height: 13px; flex-shrink: 0; }
+    .siprec-field { padding-top: 10px; overflow: hidden; max-height: 80px; transition: max-height 0.2s ease, opacity 0.15s ease, padding-top 0.2s ease; opacity: 1; }
+    .siprec-field.hidden { max-height: 0; opacity: 0; padding-top: 0; pointer-events: none; }
+    .siprec-field .hint-example { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); margin-top: 5px; }
+    input.mono-field { font-family: var(--mono); font-size: 12.5px; }
+
     input::placeholder { color: var(--text-dim); }
 
     .field-row { display: grid; grid-template-columns: 1fr 88px; gap: 8px; }
@@ -561,8 +583,23 @@
     .dtmf-key:active { transform: scale(0.93); background: var(--blue-light); border-color: var(--blue-mid); }
     .dtmf-key .sub   { font-size: 8px; font-weight: 500; color: var(--text-dim); letter-spacing: 0.06em; }
 
-    /* ── Sections ────────────────────────────────────────────────────── */
-    .section { padding: 13px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
+    /* ── Collapsible keypad ──────────────────────────────────────────── */
+    .dtmf-wrap { overflow: hidden; max-height: 0; opacity: 0; transition: max-height 0.22s ease, opacity 0.15s ease, margin-top 0.22s ease; }
+    .dtmf-wrap.open { max-height: 260px; opacity: 1; margin-top: 10px; }
+    #btn-keypad.active { color: var(--blue); background: var(--blue-light); border-color: var(--blue-mid); }
+
+    /* ── Call actions accordion (Hold/Transfer/Conference/Playback) ──── */
+    .call-actions { border-bottom: 1px solid var(--border); background: var(--surface); }
+    .ca-tabs { display: flex; gap: 3px; padding: 10px 16px 0; }
+    .ca-tab {
+      flex: 1; text-align: center; font-size: 11.5px; font-weight: 500; padding: 8px 4px;
+      border-radius: 7px 7px 0 0; color: var(--text-mid); cursor: pointer; user-select: none;
+      transition: all 0.15s; white-space: nowrap;
+    }
+    .ca-tab:hover:not(.active) { color: var(--text); background: var(--bg2); }
+    .ca-tab.active { color: var(--blue); background: var(--bg2); }
+    .ca-panel { display: none; padding: 13px 20px 16px; }
+    .ca-panel.open { display: block; }
 
     .section-title {
       font-size: 11px;
@@ -1365,12 +1402,14 @@
 <!-- ── Main ────────────────────────────────────────────────────────────── -->
 <main>
 
-  <!-- LEFT: Registration -->
+  <!-- LEFT: Registration / Settings -->
   <div class="panel">
-    <div class="panel-header">
-      <div class="panel-title">SIP Registration</div>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab(this, 'tab-registration')">Registration</div>
+      <div class="tab" onclick="switchTab(this, 'tab-settings')">Settings</div>
     </div>
-    <div class="panel-body">
+
+    <div class="tab-content active" id="tab-registration">
 
       <div class="reg-locked-banner" id="reg-locked-banner">
         <div class="reg-locked-dot"></div>
@@ -1406,12 +1445,13 @@
         <div class="field-group"><label>Display Name</label><input id="cfg-display" type="text" placeholder="Alice"></div>
       </div>
 
-      <div style="display:flex;gap:8px;">
-        <button class="btn btn-primary btn-full" id="btn-register" onclick="doRegister()">Register</button>
-        <button class="btn btn-outline" id="btn-unregister" onclick="doUnregister()" disabled>Unreg</button>
-      </div>
+      <button class="btn btn-primary btn-full" id="btn-regtoggle" onclick="doRegisterToggle()">Register</button>
 
-      <div class="api-card" style="margin-top:16px;padding:4px 12px;">
+    </div>
+
+    <div class="tab-content" id="tab-settings">
+
+      <div class="api-card" style="margin-top:0;padding:4px 12px;">
         <div class="settings-row">
           <div>
             <div class="settings-label">Auto-capture (pcap)</div>
@@ -1432,16 +1472,41 @@
             <span class="slider"></span>
           </label>
         </div>
+
+        <div class="section-label">Recording</div>
+
+        <div class="dest-row">
+          <div class="dest-picker" role="radiogroup" aria-label="Recording destination">
+            <div class="dest-option active" id="dest-local" onclick="selectDest('local')" role="radio" aria-checked="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              Local
+            </div>
+            <div class="dest-option" id="dest-siprec" onclick="selectDest('siprec')" role="radio" aria-checked="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9a9 9 0 0 1 9-7 9 9 0 0 1 9 7"/><path d="M4 15a9 9 0 0 0 9 7 9 9 0 0 0 9-7"/><circle cx="12" cy="12" r="2.5"/></svg>
+              SIP-REC
+            </div>
+          </div>
+        </div>
+
         <div class="settings-row">
           <div>
             <div class="settings-label">Auto-record</div>
-            <div class="settings-hint">Start on-demand recording automatically when a call connects</div>
+            <div class="settings-hint" id="autorecord-hint">Start recording to this container's storage automatically when a call connects</div>
           </div>
           <label class="switch">
             <input type="checkbox" id="setting-autorecord" onchange="updateSetting('autoRecordEnabled', this.checked)">
             <span class="slider"></span>
           </label>
         </div>
+
+        <div class="siprec-field hidden" id="siprec-field">
+          <label for="setting-siprec-uri">SIP-REC server</label>
+          <input type="text" id="setting-siprec-uri" class="mono-field" placeholder="sip:recorder@host:port" onchange="updateSetting('siprecServerUri', this.value)">
+          <div class="hint-example">RFC 7865/7866 — sent as a separate recording session per call, in addition to the call itself</div>
+        </div>
+
+        <div class="section-label">Media</div>
+
         <div class="settings-row">
           <div>
             <div class="settings-label">Noise suppression</div>
@@ -1449,6 +1514,16 @@
           </div>
           <label class="switch">
             <input type="checkbox" id="setting-noise-suppression" checked onchange="updateSetting('noiseSuppressionEnabled', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Secure media (SRTP)</div>
+            <div class="settings-hint">Encrypt RTP audio with SDES-SRTP — requires far-end support</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="setting-secure-media" onchange="updateSetting('secureMediaEnabled', this.checked)">
             <span class="slider"></span>
           </label>
         </div>
@@ -1568,6 +1643,7 @@
     <div class="dialer">
       <div class="dial-input-row">
         <input id="dial-target" type="text" placeholder="Extension or sip:user@server" />
+        <button class="btn btn-outline active" id="btn-keypad" onclick="toggleKeypad()" title="Hide keypad" aria-pressed="true">⌨</button>
         <button class="btn btn-primary" id="btn-call"   onclick="doCall()">Call</button>
         <button class="btn btn-danger"  id="btn-hangup" onclick="doHangup()" style="display:none;">End</button>
       </div>
@@ -1599,70 +1675,75 @@
           </div>
         </div>
       </div>
-      <div class="dtmf-grid">
-        <button class="dtmf-key" onclick="dtmf('1')">1<span class="sub"></span></button>
-        <button class="dtmf-key" onclick="dtmf('2')">2<span class="sub">ABC</span></button>
-        <button class="dtmf-key" onclick="dtmf('3')">3<span class="sub">DEF</span></button>
-        <button class="dtmf-key" onclick="dtmf('4')">4<span class="sub">GHI</span></button>
-        <button class="dtmf-key" onclick="dtmf('5')">5<span class="sub">JKL</span></button>
-        <button class="dtmf-key" onclick="dtmf('6')">6<span class="sub">MNO</span></button>
-        <button class="dtmf-key" onclick="dtmf('7')">7<span class="sub">PQRS</span></button>
-        <button class="dtmf-key" onclick="dtmf('8')">8<span class="sub">TUV</span></button>
-        <button class="dtmf-key" onclick="dtmf('9')">9<span class="sub">WXYZ</span></button>
-        <button class="dtmf-key" onclick="dtmf('*')">*</button>
-        <button class="dtmf-key" onclick="dtmf('0')">0<span class="sub">+</span></button>
-        <button class="dtmf-key" onclick="dtmf('#')">#</button>
+      <div class="dtmf-wrap open" id="dtmf-wrap">
+        <div class="dtmf-grid">
+          <button class="dtmf-key" onclick="dtmf('1')">1<span class="sub"></span></button>
+          <button class="dtmf-key" onclick="dtmf('2')">2<span class="sub">ABC</span></button>
+          <button class="dtmf-key" onclick="dtmf('3')">3<span class="sub">DEF</span></button>
+          <button class="dtmf-key" onclick="dtmf('4')">4<span class="sub">GHI</span></button>
+          <button class="dtmf-key" onclick="dtmf('5')">5<span class="sub">JKL</span></button>
+          <button class="dtmf-key" onclick="dtmf('6')">6<span class="sub">MNO</span></button>
+          <button class="dtmf-key" onclick="dtmf('7')">7<span class="sub">PQRS</span></button>
+          <button class="dtmf-key" onclick="dtmf('8')">8<span class="sub">TUV</span></button>
+          <button class="dtmf-key" onclick="dtmf('9')">9<span class="sub">WXYZ</span></button>
+          <button class="dtmf-key" onclick="dtmf('*')">*</button>
+          <button class="dtmf-key" onclick="dtmf('0')">0<span class="sub">+</span></button>
+          <button class="dtmf-key" onclick="dtmf('#')">#</button>
+        </div>
       </div>
     </div>
 
-    <!-- Hold / Resume / Record -->
-    <div class="section">
-      <div class="section-title">Hold & Resume</div>
-      <div class="action-row" style="margin-bottom:8px;">
-        <button class="btn btn-warn"    id="btn-hold"   onclick="doHold()">⏸ Hold</button>
-        <button class="btn btn-outline" id="btn-resume" onclick="doResume()" style="display:none;">▶ Resume</button>
+    <!-- Call actions: Hold / Transfer / Conference / Playback (accordion —
+         replaces 4 always-open stacked sections) -->
+    <div class="call-actions">
+      <div class="ca-tabs" role="tablist">
+        <div class="ca-tab active" role="tab" aria-selected="true"  onclick="toggleCallAction(this,'ca-hold')">⏸ Hold</div>
+        <div class="ca-tab" role="tab" aria-selected="false" onclick="toggleCallAction(this,'ca-transfer')">↗ Transfer</div>
+        <div class="ca-tab" role="tab" aria-selected="false" onclick="toggleCallAction(this,'ca-conference')">+ Conference</div>
+        <div class="ca-tab" role="tab" aria-selected="false" onclick="toggleCallAction(this,'ca-wav')">▶ Playback</div>
       </div>
-      <div class="action-row">
-        <button class="btn btn-outline btn-full" id="btn-record-start" onclick="doRecordStart()">⏺ Record</button>
-        <button class="btn btn-danger btn-full"  id="btn-record-stop"  onclick="doRecordStop()" style="display:none;">■ Stop Rec</button>
-        <button class="btn btn-outline btn-full" id="btn-audio-listen" onclick="toggleAudio()">🔊 Listen</button>
-      </div>
-    </div>
 
-    <!-- Transfer -->
-    <div class="section">
-      <div class="section-title">Transfer</div>
-      <div class="xfer-row">
-        <input id="xfer-target" type="text" placeholder="Target extension or SIP URI" />
+      <div class="ca-panel open" id="ca-hold">
+        <div class="action-row" style="margin-bottom:8px;">
+          <button class="btn btn-warn"    id="btn-hold"   onclick="doHold()">⏸ Hold</button>
+          <button class="btn btn-outline" id="btn-resume" onclick="doResume()" style="display:none;">▶ Resume</button>
+        </div>
+        <div class="action-row">
+          <button class="btn btn-outline btn-full" id="btn-record-start" onclick="doRecordStart()">⏺ Record</button>
+          <button class="btn btn-danger btn-full"  id="btn-record-stop"  onclick="doRecordStop()" style="display:none;">■ Stop Rec</button>
+          <button class="btn btn-outline btn-full" id="btn-audio-listen" onclick="toggleAudio()">🔊 Listen</button>
+        </div>
       </div>
-      <div class="action-row">
-        <button class="btn btn-outline" onclick="doBlindTransfer()">↗ Blind</button>
-        <button class="btn btn-outline" onclick="doAttendedTransfer()">⇄ Attended</button>
-      </div>
-    </div>
 
-    <!-- Conference -->
-    <div class="section">
-      <div class="section-title">Conference</div>
-      <div class="xfer-row">
-        <input id="conf-target" type="text" placeholder="Extension to conference in" />
+      <div class="ca-panel" id="ca-transfer">
+        <div class="xfer-row">
+          <input id="xfer-target" type="text" placeholder="Target extension or SIP URI" />
+        </div>
+        <div class="action-row">
+          <button class="btn btn-outline" onclick="doBlindTransfer()">↗ Blind</button>
+          <button class="btn btn-outline" onclick="doAttendedTransfer()">⇄ Attended</button>
+        </div>
       </div>
-      <div class="action-row">
-        <button class="btn btn-primary" id="btn-conf"    onclick="doConference()">+ Add to Call</button>
-        <button class="btn btn-danger btn-sm" id="btn-endconf" onclick="doEndConference()" style="display:none;">Drop</button>
-      </div>
-      <div id="conf-status"></div>
-    </div>
 
-    <!-- WAV Playback -->
-    <div class="section">
-      <div class="section-title">WAV Playback</div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <select id="wav-select" style="flex:1;"><option value="">— select file —</option></select>
-        <button class="btn btn-primary btn-sm" onclick="doPlayWav()">▶ Play</button>
-        <button class="btn btn-outline btn-sm" onclick="doStopWav()">■ Stop</button>
+      <div class="ca-panel" id="ca-conference">
+        <div class="xfer-row">
+          <input id="conf-target" type="text" placeholder="Extension to conference in" />
+        </div>
+        <div class="action-row">
+          <button class="btn btn-primary" id="btn-conf"    onclick="doConference()">+ Add to Call</button>
+          <button class="btn btn-danger btn-sm" id="btn-endconf" onclick="doEndConference()" style="display:none;">Drop</button>
+        </div>
+        <div id="conf-status"></div>
       </div>
-      <div id="wav-status"></div>
+
+      <div class="ca-panel" id="ca-wav">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <select id="wav-select" style="flex:1;"><option value="">— select file —</option></select>
+          <button class="btn btn-primary btn-sm" onclick="doPlayWav()">▶ Play</button>
+          <button class="btn btn-outline btn-sm" onclick="doStopWav()">■ Stop</button>
+        </div>
+        <div id="wav-status"></div>
+      </div>
     </div>
 
     </div><!-- end scroll wrapper -->
@@ -1783,8 +1864,7 @@ function applyState(s) {
   if (s.registered) {
     setHeaderBadge('reg-badge','reg-live');
     setLabel('reg-label', s.config ? `${s.config.username}@${s.config.server}` : 'Registered');
-    document.getElementById('btn-register').disabled   = true;
-    document.getElementById('btn-unregister').disabled = false;
+    setRegButtonState(true);
     lockRegForm(s.config);
   }
   if (s.activeCall) {
@@ -1805,8 +1885,7 @@ function onRegistered(data) {
   setHeaderBadge('reg-badge','reg-live');
   setLabel('reg-label', `${data.username}@${data.server}`);
   addLog('info',`Registered: ${data.displayName} <${data.username}@${data.server}>`);
-  document.getElementById('btn-register').disabled   = true;
-  document.getElementById('btn-unregister').disabled = false;
+  setRegButtonState(true);
   document.getElementById('unreg-box').style.display = 'none';
   lockRegForm({ username: data.username, server: data.server, displayName: data.displayName });
 }
@@ -1815,11 +1894,25 @@ function onUnregistered() {
   state.registered = false;
   setHeaderBadge('reg-badge','reg-idle');
   setLabel('reg-label','Unregistered');
-  document.getElementById('btn-register').disabled   = false;
-  document.getElementById('btn-unregister').disabled = true;
+  setRegButtonState(false);
   document.getElementById('unreg-box').style.display = '';
   unlockRegForm();
   addLog('info','Unregistered');
+}
+
+// The single Register/Unregister button morphs in place rather than showing
+// two buttons side by side (one always disabled) — text, style and the
+// action it triggers all flip together with registration state.
+function setRegButtonState(registered) {
+  const btn = document.getElementById('btn-regtoggle');
+  btn.textContent = registered ? 'Unregister' : 'Register';
+  btn.classList.toggle('btn-primary', !registered);
+  btn.classList.toggle('btn-outline', registered);
+  btn.disabled = false;
+}
+
+function doRegisterToggle() {
+  if (state.registered) doUnregister(); else doRegister();
 }
 
 function toggleUnregAdvanced() {
@@ -1936,9 +2029,9 @@ async function doRegister() {
   };
   if (!cfg.server||!cfg.username||!cfg.password) { addLog('error','Server, username and password required'); return; }
   addLog('info',`Registering ${cfg.username}@${cfg.server}...`);
-  document.getElementById('btn-register').disabled = true;
+  document.getElementById('btn-regtoggle').disabled = true;
   const r = await api('POST','/api/register',cfg);
-  if (r.error) { addLog('error',r.error); document.getElementById('btn-register').disabled = false; }
+  if (r.error) { addLog('error',r.error); document.getElementById('btn-regtoggle').disabled = false; }
 }
 
 async function doUnregister() { await api('POST','/api/unregister'); }
@@ -2197,10 +2290,35 @@ function fmtSize(b) {
 function fmtDate(d) { return d ? new Date(d).toLocaleString() : ''; }
 
 function switchTab(btn, tabId) {
-  btn.closest('.tabs').querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  const panel = btn.closest('.panel');
+  panel.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
-  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-  document.getElementById(tabId).classList.add('active');
+  panel.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  panel.querySelector('#' + tabId).classList.add('active');
+}
+
+function toggleKeypad() {
+  const wrap = document.getElementById('dtmf-wrap');
+  const btn  = document.getElementById('btn-keypad');
+  const open = wrap.classList.toggle('open');
+  btn.classList.toggle('active', open);
+  btn.setAttribute('aria-pressed', String(open));
+  btn.title = open ? 'Hide keypad' : 'Show keypad';
+}
+
+// True accordion: clicking the already-open tab closes it (zero panels open),
+// clicking another tab switches — at most one of the four panels is ever
+// rendered at once instead of all four stacked permanently.
+function toggleCallAction(btn, panelId) {
+  const bar = btn.closest('.call-actions');
+  const wasActive = btn.classList.contains('active');
+  bar.querySelectorAll('.ca-tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+  bar.querySelectorAll('.ca-panel').forEach(p => p.classList.remove('open'));
+  if (!wasActive) {
+    btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
+    bar.querySelector('#' + panelId).classList.add('open');
+  }
 }
 
 // Hold / Resume
@@ -3176,12 +3294,32 @@ async function loadSettings() {
   document.getElementById('setting-transcript').checked         = r.liveTranscriptEnabled;
   document.getElementById('setting-autorecord').checked         = r.autoRecordEnabled;
   document.getElementById('setting-noise-suppression').checked  = r.noiseSuppressionEnabled;
+  document.getElementById('setting-secure-media').checked       = r.secureMediaEnabled;
+  if (r.siprecServerUri) document.getElementById('setting-siprec-uri').value = r.siprecServerUri;
+  selectDest(r.siprecEnabled ? 'siprec' : 'local');
 }
 
 async function updateSetting(key, value) {
   const r = await api('POST', '/api/settings', { [key]: value });
   if (r.error) { addLog('error', r.error); return; }
   addLog('info', `Setting updated: ${key}=${value}`);
+}
+
+// Recording destination is a single choice (Local on-demand recording vs.
+// an external SIP-REC server), driven by autoRecordEnabled/siprecEnabled
+// respectively — not two independent toggles, so switching destination
+// here doesn't silently leave the other one on.
+function selectDest(which) {
+  const isSiprec = which === 'siprec';
+  document.getElementById('dest-local').classList.toggle('active', !isSiprec);
+  document.getElementById('dest-local').setAttribute('aria-checked', String(!isSiprec));
+  document.getElementById('dest-siprec').classList.toggle('active', isSiprec);
+  document.getElementById('dest-siprec').setAttribute('aria-checked', String(isSiprec));
+  document.getElementById('siprec-field').classList.toggle('hidden', !isSiprec);
+  document.getElementById('autorecord-hint').textContent = isSiprec
+    ? "Start recording automatically when a call connects (sent to the SIP-REC server below)"
+    : "Start recording to this container's storage automatically when a call connects";
+  updateSetting('siprecEnabled', isSiprec);
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
