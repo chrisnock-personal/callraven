@@ -57,7 +57,7 @@ A fully containerized SIP softphone with a web UI and a complete REST API for he
          │ SIP over WebSocket or UDP   │ UDP RTP
          ▼                             ▼
     SIP Proxy / PBX              RTP Media Stream
-   (Asterisk, FreePBX,           (G.722, PCMU, PCMA)
+   (Asterisk, FreePBX,       (Opus, G.722, PCMU, PCMA)
     Kamailio, etc.)
 ```
 
@@ -139,6 +139,9 @@ services:
       SIP_PORT: 5060
       RTP_PORT_LOW: 10000
       RTP_PORT_HIGH: 20000
+      CAPTURE_INTERFACE: any
+      # MEDIA_IP: 192.0.2.10  # Override if container picks wrong NIC for SDP/RTP
+    restart: unless-stopped
 volumes:
   captures:
     driver: local
@@ -185,6 +188,7 @@ CI (`.github/workflows/ci.yml`) runs lint and unit tests on every push/PR, plus 
 | `TRANSCRIPT_WINDOW_MS` | `6000` | Live transcription flush interval (ms) |
 | `TRANSCRIPT_PROMPT` | `"compliance monitoring recording quality"` | Whisper prompt string, biases the model toward telephony vocabulary |
 | `NODE_ENV` | `production` | Node environment |
+| `OPUS_FORCE_WASM` | `1` (baked into the image) | Forces [`@evan/opus`](https://github.com/evanwashere/opus) to use its WASM decoder/encoder instead of a native addon — for portability across container architectures, not something you'd normally override |
 
 The container runs as **root** with `--privileged` and `--network host` — required for raw packet capture (pure Node.js libpcap writes, no tcpdump) and UDP socket binding.
 
@@ -521,20 +525,26 @@ Lists all post-call transcripts. Recordings in the Captures tab can be transcrib
 ### Unregistered Calling
 Type an `address@sipdomain` target into the dial box while unregistered and hit Call — no registration required. An **Advanced** panel exposes caller ID, transport, and port overrides. See [Unregistered Calling](#unregistered-calling) in the API reference.
 
-### Settings Toggles
-Three switches in the left panel control per-call automatic behaviour: **Auto-capture (pcap)**, **Live transcript**, and **Auto-record** (all backed by `GET`/`POST /api/settings`). Auto-capture and live transcript default on (matching the original always-on behaviour); auto-record defaults off, since on-demand recording has always been a manual Start/Stop action.
+### Registration / Settings Tabs
+The left panel is split into two tabs — **Registration** (the SIP account form) and **Settings** — matching the tabbed pattern already used by the right panel (Call History/WAV Files/Live Transcript). Switching tabs doesn't affect an in-progress registration or call.
 
-### Collapsible Side Panels
-The ▤ button in the header hides/shows both the left (SIP Registration) and right (Captures/History/Transcript) panels at once, leaving just the center dialer — useful to reclaim screen space. Preference is persisted to `localStorage`.
+### Settings Toggles
+All backed by `GET`/`POST /api/settings`, in the **Settings** tab: **Auto-capture (pcap)** and **Live transcript** (default on, matching the original always-on behaviour), a **Recording destination** picker — **Local** (this container's on-demand recording) or **SIP-REC** (sends to an external compliance recording server, with a server-URI field that appears when selected) — plus **Auto-record** underneath it, **Noise suppression** (default on), **Secure media (SRTP)** (default off), and **Echo cancellation** (default off — see [Echo Cancellation](#echo-cancellation) above).
 
 ### Collapsible API Reference
-The API endpoint reference in the left panel is collapsed by default (click to expand) to keep the registration form the focus.
+The API endpoint reference at the bottom of the **Settings** tab is collapsed by default (click to expand).
+
+### Compact Call Controls
+The DTMF keypad collapses behind a ⌨ toggle next to the dial input rather than always taking up space. **Hold & Resume**, **Transfer**, **Conference**, and **Playback** are one tab bar with a single expandable panel underneath (click a tab to open it, click again to close) instead of four permanently stacked sections.
+
+### Collapsible Side Panels
+The ▤ button in the header hides/shows both the left (Registration/Settings) and right (Captures/History/Transcript) panels at once, leaving just the center dialer — useful to reclaim screen space. Preference is persisted to `localStorage`.
 
 ### System Log
 An inline log panel below the dialer, collapsed by default to save screen space — click the header to expand it. Shows a badge with the count of new entries while collapsed.
 
 ### Registration Form Lock
-When registered, the SIP registration form locks and displays the active credentials. Fields populate automatically from server state on page reload — even if registration was done via the API.
+When registered, the SIP registration form locks and displays the active credentials. Fields populate automatically from server state on page reload — even if registration was done via the API. The Register/Unregister button is a single control that morphs label and style with state, rather than showing both actions side by side with one always disabled.
 
 ### Mobile Responsive
 The layout adapts at 1100px (right panel drops below) and 768px (single column). Functional on tablets and large phone screens. The center dialer panel is capped at a comfortable max-width on wide desktop screens rather than stretching edge-to-edge.
@@ -621,7 +631,7 @@ SDP advertises Opus as the preferred codec, then G.722, then PCMU/PCMA. If the P
 | Path | Contents |
 |---|---|
 | `/captures/` | pcap files, on-demand recordings (`rec_*_rx.wav` / `rec_*_tx.wav`), transcripts (`rec_*.json`), call history JSON |
-| `/wavfiles/` | Uploaded and G.722-converted playback files |
+| `/wavfiles/` | Uploaded playback files, converted to `.g722` and `.opusraw` siblings at upload time, plus a `.refpcm16k` sibling used as the echo canceller's reference signal |
 | `/models/ggml-small.en.bin` | Whisper model |
 | `/usr/local/bin/whisper-cli` | Static Whisper binary |
 
@@ -632,9 +642,9 @@ SDP advertises Opus as the preferred codec, then G.722, then PCMU/PCMA. If the P
 - **No tcpdump required** — packet captures are written in pure Node.js using the libpcap binary format
 - **No audio hardware required** — media is handled entirely in Node.js using `dgram` UDP sockets; fully headless-capable
 - **Full SIP dialog captured** — INVITE, 100 Trying, 180 Ringing, 200 OK, ACK, and BYE all appear in Wireshark
-- **Dual-channel audio** — remote (rx) and local/playback (tx) RTP are decoded and recorded separately (G.722 ADPCM, μ-law, A-law), enabling speaker diarization in transcripts
+- **Dual-channel audio** — remote (rx) and local/playback (tx) RTP are decoded and recorded separately (Opus, G.722 ADPCM, μ-law, A-law), enabling speaker diarization in transcripts
 - **Hold** — implemented via RTP mute + raw SIP re-INVITE (bypasses JsSIP's WebRTC renegotiation)
-- **WAV playback** — injects G.722 frames directly into the RTP stream, synchronised to the existing stream's SSRC and sequence number
+- **WAV playback** — injects G.722 or Opus frames (whichever the call negotiated) directly into the RTP stream, synchronised to the existing stream's SSRC and sequence number
 - **On-demand recording** — separate from the always-on pcap; start/stop at any point during a call, saves both rx and tx WAV files
 - **Live audio relay** — inbound RTP is decoded and streamed to the browser via a dedicated WebSocket endpoint for real-time listening
 - **Transcription** — on-device Whisper.cpp (statically compiled, no external API calls); live transcription during calls plus on-demand post-call transcription with speaker diarization
