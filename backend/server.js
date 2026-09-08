@@ -215,16 +215,18 @@ app.get('/api/settings', (req, res) => res.json({
   ...settings,
   noiseSuppressionEnabled: sipManager.getNoiseSuppression(),
   secureMediaEnabled:      sipManager.getSecureMedia(),
+  echoCancellationEnabled: sipManager.getEchoCancellation(),
   ...siprecSettingsFields(),
 }));
 
 app.post('/api/settings', (req, res) => {
-  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled, siprecEnabled, siprecServerUri } = req.body;
+  const { captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled, echoCancellationEnabled, siprecEnabled, siprecServerUri } = req.body;
   if (typeof captureEnabled === 'boolean')          settings.captureEnabled          = captureEnabled;
   if (typeof liveTranscriptEnabled === 'boolean')   settings.liveTranscriptEnabled   = liveTranscriptEnabled;
   if (typeof autoRecordEnabled === 'boolean')       settings.autoRecordEnabled       = autoRecordEnabled;
   if (typeof noiseSuppressionEnabled === 'boolean') sipManager.setNoiseSuppression(noiseSuppressionEnabled);
   if (typeof secureMediaEnabled === 'boolean')      sipManager.setSecureMedia(secureMediaEnabled);
+  if (typeof echoCancellationEnabled === 'boolean') sipManager.setEchoCancellation(echoCancellationEnabled);
   if (typeof siprecEnabled === 'boolean' || typeof siprecServerUri === 'string') {
     sipManager.setSiprecConfig({ enabled: siprecEnabled, serverUri: siprecServerUri });
   }
@@ -232,6 +234,7 @@ app.post('/api/settings', (req, res) => {
     ...settings,
     noiseSuppressionEnabled: sipManager.getNoiseSuppression(),
     secureMediaEnabled:      sipManager.getSecureMedia(),
+    echoCancellationEnabled: sipManager.getEchoCancellation(),
     ...siprecSettingsFields(),
   });
 });
@@ -385,7 +388,14 @@ app.get('/api/wavfiles', (req, res) => {
 
 /** POST /api/wavfiles/upload — upload, convert to raw G.722, and (for
  * Opus calls) also produce a matching .opusraw sibling — see
- * SipManager.playWav for how the right one gets picked at play time. */
+ * SipManager.playWav for how the right one gets picked at play time.
+ * Also keeps a .refpcm16k sibling: plain 16kHz mono PCM of the same
+ * clip, used as the echo canceller's reference signal (RtpBridge's
+ * playWav loads it once per file and indexes it by frame number — see
+ * CLAUDE.md's Echo cancellation section for why this must be a
+ * precomputed batch decode, not a second live streaming decoder). This
+ * was already being produced as a throwaway step on the way to Opus
+ * encoding below; it's just no longer deleted afterward. */
 app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -394,7 +404,8 @@ app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
   // Output as raw G.722 bitstream — no container, just bytes
   const outName  = baseName + '.g722';
   const outPath  = path.join(WAV_DIR, outName);
-  const pcmPath  = path.join(WAV_DIR, baseName + '.pcm16k.tmp');
+  const pcmName  = baseName + '.refpcm16k';
+  const pcmPath  = path.join(WAV_DIR, pcmName);
   const opusName = baseName + '.opusraw';
   const opusPath = path.join(WAV_DIR, opusName);
 
@@ -413,14 +424,15 @@ app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
 
     // Opus has no raw/bare-stream ffmpeg format (only Ogg Opus, a
     // container) — so extract plain 16kHz PCM instead (ffmpeg handles that
-    // natively) and encode it to Opus in Node via opusCodec.js.
+    // natively) and encode it to Opus in Node via opusCodec.js. This same
+    // PCM file is kept (not deleted) as the .refpcm16k echo-canceller
+    // reference — see the handler comment above.
     await runFfmpeg(['-y', '-i', inPath, '-ar', '16000', '-ac', '1', '-f', 's16le', pcmPath]);
     fs.writeFileSync(opusPath, opusCodec.encodePcmToFrameFile(fs.readFileSync(pcmPath)));
-    fs.unlinkSync(pcmPath);
 
     fs.unlinkSync(inPath);
     const stat = fs.statSync(outPath);
-    console.log(`[WAV] Converted to G.722: ${outName} (${stat.size} bytes), Opus: ${opusName} (${fs.statSync(opusPath).size} bytes)`);
+    console.log(`[WAV] Converted to G.722: ${outName} (${stat.size} bytes), Opus: ${opusName} (${fs.statSync(opusPath).size} bytes), reference PCM: ${pcmName}`);
     res.json({ success: true, filename: outName, url: `/wavfiles/${outName}` });
   } catch (err) {
     console.error(`[WAV] ffmpeg error: ${err.message}`);
@@ -428,15 +440,19 @@ app.post('/api/wavfiles/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-/** DELETE /api/wavfiles/:filename — also removes the .opusraw sibling
- * produced alongside it at upload time, if any (see POST .../upload). */
+/** DELETE /api/wavfiles/:filename — also removes the .opusraw and
+ * .refpcm16k siblings produced alongside it at upload time, if any (see
+ * POST .../upload). */
 app.delete('/api/wavfiles/:filename', (req, res) => {
   const filePath = path.join(WAV_DIR, path.basename(req.params.filename));
-  const opusPath = filePath.replace(/\.(g722|wav)$/i, '') + '.opusraw';
+  const baseName = filePath.replace(/\.(g722|wav)$/i, '');
+  const opusPath = baseName + '.opusraw';
+  const pcmPath  = baseName + '.refpcm16k';
   try {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
       try { fs.unlinkSync(opusPath); } catch (e) { /* no sibling to clean up */ }
+      try { fs.unlinkSync(pcmPath); } catch (e) { /* no sibling to clean up */ }
       res.json({ success: true });
     } else res.status(404).json({ error: 'File not found' });
   } catch (err) { res.status(500).json({ error: err.message }); }

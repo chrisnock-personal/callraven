@@ -61,6 +61,7 @@ const { clamp16 }    = require('./pcmUtils');
 const callHistory    = require('./callHistory');
 const { AudioWriter } = require('./audioDecoder');
 const { NoiseSuppressor } = require('./noiseSuppressor');
+const { EchoCanceller } = require('./echoCanceller');
 const srtp = require('./srtp');
 const { DtmfEventTracker } = require('./dtmfEvent');
 const opusCodec = require('./opusCodec');
@@ -320,7 +321,7 @@ function convertToUlaw8k(raw, fmt) {
 
 // ─── RTP bridge ──────────────────────────────────────────────────────────────
 class RtpBridge {
-  constructor(localPort, remoteIp, remotePort, callId, nsEnabled = true, srtpOpts = null, negotiatedCodec = null, remoteOpusPt = null) {
+  constructor(localPort, remoteIp, remotePort, callId, nsEnabled = true, srtpOpts = null, negotiatedCodec = null, remoteOpusPt = null, ecEnabled = false) {
     this.localPort   = localPort;
     this.remoteIp    = remoteIp;
     this.remotePort  = remotePort;
@@ -391,6 +392,24 @@ class RtpBridge {
     this.nsEnabled = nsEnabled;
     this._ns = {};
 
+    // Line/hybrid echo cancellation — only meaningful during WAV playback
+    // (see echoCanceller.js's header comment for why: it's the only
+    // outbound audio this project ever transmits). One EchoCanceller
+    // instance per bridge (unlike noise suppression, not keyed by sample
+    // rate — see below, only 16kHz inbound is ever supported). The
+    // reference PCM for whatever file is currently playing is cached in
+    // `_echoRefCache`, keyed by file path (files don't change after
+    // upload, so this is safe to reuse across plays/calls).
+    this.ecEnabled     = ecEnabled;
+    this._echoCanceller = null;
+    this._echoRefCache  = new Map(); // filePath -> Int16Array reference PCM
+    this._echoRef       = null;      // reference for the CURRENTLY playing file, if any
+    // Both the reference array and this cursor are indexed from the same
+    // t=0 (the moment playback starts) — that shared zero point is what
+    // lets the filter's own tap delay-line find the actual round-trip
+    // echo delay, without RtpBridge needing to track or estimate it.
+    this._echoRxCursor  = 0;         // decoded 16kHz inbound samples consumed so far, this playback
+
     // Reorders/paces decoded-audio consumers (browser relay, live
     // transcription, SIPREC, DTMF, recording) — see jitterBuffer.js. The
     // raw wire-order pass-through relay a few lines below in start()
@@ -409,6 +428,53 @@ class RtpBridge {
   _suppressNoise(sampleRate, pcm16) {
     if (!this._ns[sampleRate]) this._ns[sampleRate] = new NoiseSuppressor(sampleRate, { enabled: this.nsEnabled });
     return this._ns[sampleRate].process(pcm16);
+  }
+
+  setEchoCancellation(enabled) {
+    this.ecEnabled = !!enabled;
+    if (this._echoCanceller) this._echoCanceller.setEnabled(this.ecEnabled);
+  }
+
+  // Loads (and caches) the .refpcm16k reference sibling for a WAV
+  // playback file — see server.js's upload handler and echoCanceller.js's
+  // header comment for why this exists and why it's a batch read rather
+  // than a live decode. Returns null (AEC simply won't run) if the file
+  // predates this feature and has no reference sibling.
+  _loadEchoReference(filePath) {
+    const refPath = filePath.replace(/\.(g722|opusraw)$/i, '') + '.refpcm16k';
+    if (this._echoRefCache.has(refPath)) return this._echoRefCache.get(refPath);
+    let ref;
+    try {
+      const buf = fs.readFileSync(refPath);
+      const samples = buf.length >> 1;
+      ref = new Int16Array(samples);
+      for (let i = 0; i < samples; i++) ref[i] = buf.readInt16LE(i * 2);
+    } catch (e) {
+      ref = null;
+    }
+    this._echoRefCache.set(refPath, ref);
+    return ref;
+  }
+
+  // Cancels line/hybrid echo of our own WAV playback out of decoded
+  // 16kHz inbound PCM — a no-op passthrough unless playback is actually
+  // in progress and a reference for the playing file loaded
+  // successfully. Runs BEFORE noise suppression (cancel echo against the
+  // true received signal, then denoise the residual) — see _emitAudio.
+  _cancelEcho(pcm16) {
+    if (!this.ecEnabled || !this.playing || !this._echoRef) return pcm16;
+    if (!this._echoCanceller) this._echoCanceller = new EchoCanceller({ enabled: this.ecEnabled });
+
+    const n = pcm16.length >> 1;
+    const refLen = this._echoRef.length;
+    const start  = this._echoRxCursor;
+    const refChunk = Buffer.alloc(pcm16.length);
+    for (let i = 0; i < n; i++) {
+      const idx = start + i;
+      refChunk.writeInt16LE(idx < refLen ? this._echoRef[idx] : 0, i * 2);
+    }
+    this._echoRxCursor += n;
+    return this._echoCanceller.process(pcm16, refChunk);
   }
 
   start() {
@@ -621,6 +687,14 @@ class RtpBridge {
 
     this.playing   = true;
 
+    // Echo-cancellation bookkeeping for this playback — see
+    // _cancelEcho/_loadEchoReference. Always (re-)loaded regardless of
+    // ecEnabled so a live toggle takes effect immediately for whatever's
+    // already playing, not just the next play.
+    this._echoRef = this._loadEchoReference(filePath);
+    this._echoRxCursor = 0;
+    if (this._echoCanceller) this._echoCanceller.reset();
+
     this.playTimer = setInterval(() => {
       if (!this.socket || frameIndex >= frames.length) {
         this.stopPlayback();
@@ -751,7 +825,12 @@ class RtpBridge {
   // browser's Web Audio API throws on a 0-length AudioBuffer).
   _emitAudio(pt, sampleRate, pcm16) {
     if (!this.onAudio) return;
-    const suppressed = this._suppressNoise(sampleRate, pcm16);
+    // Echo cancellation only ever runs at 16kHz (G.722/Opus inbound) — the
+    // reference signal (our own WAV playback) is always 16kHz-domain (see
+    // echoCanceller.js), and this project doesn't resample it for 8kHz
+    // PCMU/PCMA calls in v1 (documented scoping cut, not an oversight).
+    const decancelled = sampleRate === 16000 ? this._cancelEcho(pcm16) : pcm16;
+    const suppressed = this._suppressNoise(sampleRate, decancelled);
     if (suppressed.length > 0) this.onAudio(pt, suppressed);
   }
 
@@ -888,6 +967,11 @@ class SipManager extends EventEmitter {
     // object, taking effect only on the next call), this one needs to be
     // readable here since it's pushed to a live bridge immediately.
     this.noiseSuppressionEnabled = true;
+    // Same reasoning as noiseSuppressionEnabled above (pushed live to an
+    // active bridge) — default false, unlike noise suppression's
+    // default-true, since this is newer/less-proven DSP; safer to ship
+    // opt-in (see echoCanceller.js).
+    this.echoCancellationEnabled = false;
     // SDES-SRTP toggle. Unlike noiseSuppressionEnabled, this can't be pushed
     // to a live call — crypto is negotiated once at INVITE/answer time — so
     // it only affects calls placed/answered after being set. Lives here
@@ -1449,7 +1533,7 @@ class SipManager extends EventEmitter {
       this._log('warn', 'Remote answer offered SRTP but we did not request it — ignoring');
     }
     const srtpOpts = (localSrtp && remote.remoteCrypto) ? { localSrtp, remoteSrtp: remote.remoteCrypto } : null;
-    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled, srtpOpts, remote.negotiatedCodec, remote.remoteOpusPt);
+    this.rtpBridge  = new RtpBridge(localPort, remote.ip, remote.port, callId, this.noiseSuppressionEnabled, srtpOpts, remote.negotiatedCodec, remote.remoteOpusPt, this.echoCancellationEnabled);
     this.rtpBridge.onDtmf = (digit, info) => {
       this._log('info', `DTMF received: ${digit}`);
       this.emit('dtmfReceived', { callId: this.activeCall?.callId, digit, durationMs: info.durationMs });
@@ -1529,6 +1613,20 @@ class SipManager extends EventEmitter {
 
   getNoiseSuppression() {
     return this.noiseSuppressionEnabled;
+  }
+
+  // Same reasoning as setNoiseSuppression above re: confBridge — echo
+  // cancellation only ever runs against the primary bridge's own WAV
+  // playback, so there's nothing meaningful to push to confBridge either.
+  setEchoCancellation(enabled) {
+    this.echoCancellationEnabled = !!enabled;
+    if (this.rtpBridge) this.rtpBridge.setEchoCancellation(this.echoCancellationEnabled);
+    this._log('info', `Echo cancellation ${this.echoCancellationEnabled ? 'enabled' : 'disabled'}`);
+    return this.echoCancellationEnabled;
+  }
+
+  getEchoCancellation() {
+    return this.echoCancellationEnabled;
   }
 
   // Toggle SDES-SRTP for future calls. Takes effect on the next call placed
@@ -2112,7 +2210,12 @@ class SipManager extends EventEmitter {
                 this._log('warn', 'Conference leg: offered SRTP but remote answer had no compatible crypto');
               }
               const srtpOpts = (localSrtp && remote.remoteCrypto) ? { localSrtp, remoteSrtp: remote.remoteCrypto } : null;
-              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId, this.noiseSuppressionEnabled, srtpOpts, remote.negotiatedCodec, remote.remoteOpusPt);
+              // Echo cancellation is explicitly false here, not
+              // this.echoCancellationEnabled — same reasoning as
+              // setEchoCancellation's comment: the conference leg never
+              // plays this bridge's own WAV file, so there's no
+              // reference signal for it to cancel against.
+              this.confBridge = new RtpBridge(rtpPort, remote.ip, remote.port, this.activeCall?.callId, this.noiseSuppressionEnabled, srtpOpts, remote.negotiatedCodec, remote.remoteOpusPt, false);
               this.confBridge.start();
 
               // Cross-wire: forward packets from leg1 to leg2 and vice versa

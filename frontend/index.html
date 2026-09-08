@@ -1527,6 +1527,16 @@
             <span class="slider"></span>
           </label>
         </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Echo cancellation</div>
+            <div class="settings-hint">Cancel line/hybrid echo of WAV playback from inbound audio (Listen only — not recordings/transcripts)</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="setting-echo-cancellation" onchange="updateSetting('echoCancellationEnabled', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
 
       <div class="api-ref collapsed" id="api-ref">
@@ -3295,6 +3305,7 @@ async function loadSettings() {
   document.getElementById('setting-autorecord').checked         = r.autoRecordEnabled;
   document.getElementById('setting-noise-suppression').checked  = r.noiseSuppressionEnabled;
   document.getElementById('setting-secure-media').checked       = r.secureMediaEnabled;
+  document.getElementById('setting-echo-cancellation').checked  = r.echoCancellationEnabled;
   if (r.siprecServerUri) document.getElementById('setting-siprec-uri').value = r.siprecServerUri;
   selectDest(r.siprecEnabled ? 'siprec' : 'local');
 }

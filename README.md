@@ -230,16 +230,22 @@ The recorded media is **not** a literal copy of the call's RTP packets: per RFC 
 
 No third-party dependencies: the RFC 7865 metadata XML is simple enough to hand-build as a template string, and RTCP Sender Report/SDES packets are hand-built per RFC 3550 the same way this app already hand-builds RTP packets elsewhere. There's no SIPREC-capable PBX to test against in this project's own CI infrastructure (Asterisk has no SIPREC support at all), so `ci/mock_siprec_server.py` stands in as a minimal reference SRS for both local testing and CI.
 
+### Echo Cancellation
+
+Cancels **line/hybrid echo** — not acoustic echo, which doesn't apply here since CallRaven has no microphone/speaker of its own. The only outbound audio this app ever transmits is WAV playback (an IVR-style prompt, say), so the only echo scenario is that playback bouncing back via an analog gateway/PBX hybrid elsewhere in the call path. Enable `echoCancellationEnabled` via `POST /api/settings` (default `false` — newer, less-proven DSP than noise suppression, so it ships opt-in); applies immediately to an already-active call, same as noise suppression.
+
+An NLMS adaptive filter (64ms tail at 16kHz) uses the WAV file's own audio as the reference signal, decoded once at upload time (not live, to avoid two independent decoders drifting out of alignment with each other) and cached as a `.refpcm16k` sibling next to the `.g722`/`.opusraw` files. Only runs on 16kHz-domain inbound audio (G.722/Opus) and only while a WAV is actually playing; 8kHz (PCMU/PCMA) calls are a documented v1 gap, not resampled. **Like noise suppression, this only affects the browser `/audio` Listen relay — not recordings or live transcription**, which read raw undecoded RTP payload upstream of this for fidelity, matching this project's existing noise-suppression scope exactly.
+
 ### Settings
 
-Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` default to `true`, matching the prior always-on behaviour; `autoRecordEnabled` defaults to `false`, since on-demand recording has always been opt-in. Changes take effect on the next call. `noiseSuppressionEnabled` (default `true`) is the one exception — it applies immediately to any already-active call, not just the next one.
+Global feature toggles (not per-call). `captureEnabled`/`liveTranscriptEnabled` default to `true`, matching the prior always-on behaviour; `autoRecordEnabled` defaults to `false`, since on-demand recording has always been opt-in. Changes take effect on the next call. `noiseSuppressionEnabled` (default `true`) and `echoCancellationEnabled` (default `false`) are the exceptions — both apply immediately to any already-active call, not just the next one.
 
 `secureMediaEnabled` (default `false`) enables SDES-SRTP (`AES_CM_128_HMAC_SHA1_80`) on the RTP media path — see [Secure Media (SRTP)](#secure-media-srtp) above. `siprecEnabled`/`siprecServerUri` (both unset by default) configure sending calls to a SIP-REC server — see [Session Recording (SIPREC)](#session-recording-siprec) above. Like the other non-noise-suppression toggles, these only affect calls placed/answered after they're set.
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
-| `GET` | `/api/settings` | — | Current settings: `{captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled, siprecEnabled, siprecServerUri}` |
-| `POST` | `/api/settings` | `{captureEnabled?, liveTranscriptEnabled?, autoRecordEnabled?, noiseSuppressionEnabled?, secureMediaEnabled?, siprecEnabled?, siprecServerUri?}` | Update one or more settings |
+| `GET` | `/api/settings` | — | Current settings: `{captureEnabled, liveTranscriptEnabled, autoRecordEnabled, noiseSuppressionEnabled, secureMediaEnabled, echoCancellationEnabled, siprecEnabled, siprecServerUri}` |
+| `POST` | `/api/settings` | `{captureEnabled?, liveTranscriptEnabled?, autoRecordEnabled?, noiseSuppressionEnabled?, secureMediaEnabled?, echoCancellationEnabled?, siprecEnabled?, siprecServerUri?}` | Update one or more settings |
 
 ### Calls
 
