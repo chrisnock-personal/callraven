@@ -134,6 +134,7 @@ services:
       - label=disable
     volumes:
       - captures:/captures
+      - wavfiles:/wavfiles
     environment:
       PORT: 3000
       SIP_PORT: 5060
@@ -144,6 +145,8 @@ services:
     restart: unless-stopped
 volumes:
   captures:
+    driver: local
+  wavfiles:
     driver: local
 ```
 
